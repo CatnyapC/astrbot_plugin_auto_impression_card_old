@@ -218,21 +218,21 @@ class AutoImpressionCard(Star):
                         "ambiguous", "alias matched multiple users", ids
                     )
 
-                if target_id:
-                    pass
-                else:
-                profiles = await asyncio.to_thread(
-                    self.store.find_profiles_by_nickname, group_id, target
-                )
-                if len(profiles) == 1:
-                    target_id = profiles[0].user_id
-                elif len(profiles) > 1:
-                    ids = ", ".join(p.user_id for p in profiles[:5])
-                    return self._tool_result(
-                        "ambiguous", "nickname matched multiple users", ids
+                if not target_id:
+                    profiles = await asyncio.to_thread(
+                        self.store.find_profiles_by_nickname, group_id, target
                     )
-                else:
-                    return self._tool_result("not_found", "no profile for alias")
+                    if len(profiles) == 1:
+                        target_id = profiles[0].user_id
+                    elif len(profiles) > 1:
+                        ids = ", ".join(p.user_id for p in profiles[:5])
+                        return self._tool_result(
+                            "ambiguous", "nickname matched multiple users", ids
+                        )
+                    else:
+                        return self._tool_result(
+                            "not_found", "no profile for alias"
+                        )
 
         if target_id == speaker_id and not is_self_profile_query(message_text):
             return self._tool_result(
