@@ -690,12 +690,10 @@ class AutoImpressionCard(Star):
         return "\n".join(parts)
 
     def _format_profile_for_reply(self, profile: ProfileRecord) -> str:
-        summary = (profile.summary or "").strip()
         traits = profile.traits[: self.config.inject_max_traits]
         facts = profile.facts[: self.config.inject_max_facts]
         lines = [
             f"昵称: {profile.nickname or ''}",
-            f"Summary: {summary}" if summary else "Summary: (empty)",
         ]
         if traits:
             lines.append("Traits: " + ", ".join(traits))
