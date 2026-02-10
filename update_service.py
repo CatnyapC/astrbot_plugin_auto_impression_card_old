@@ -639,6 +639,8 @@ def build_update_prompt(existing: dict, pending) -> str:
     for idx, msg in enumerate(pending, 1):
         ts_text = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(msg.ts))
         text = plain_from_raw_text(msg.message)
+        if not text:
+            continue
         lines.append(f"{idx}. [{ts_text}] {text}")
     return "\n".join(lines)
 

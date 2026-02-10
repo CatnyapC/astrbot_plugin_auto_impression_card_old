@@ -79,6 +79,12 @@ async def maybe_schedule_alias_analysis(
                 return
 
             now = int(time.time())
+            nickname_map = await asyncio.to_thread(
+                store.get_nickname_map,
+                group_id,
+                {item["speaker_id"] for item in aliases}
+                | {item["target_id"] for item in aliases},
+            )
             pairs: set[tuple[str, str]] = set()
             for item in aliases[:MAX_ALIAS_RESULTS]:
                 speaker_id = item["speaker_id"]
@@ -90,6 +96,9 @@ async def maybe_schedule_alias_analysis(
                     item["alias"],
                     target_id,
                     item["confidence"],
+                    nickname_map.get(speaker_id),
+                    nickname_map.get(target_id),
+                    None,
                     now,
                 )
                 pairs.add((speaker_id, target_id))
@@ -173,6 +182,12 @@ async def force_alias_analysis(
                 return False
 
             now = int(time.time())
+            nickname_map = await asyncio.to_thread(
+                store.get_nickname_map,
+                group_id,
+                {item["speaker_id"] for item in aliases}
+                | {item["target_id"] for item in aliases},
+            )
             pairs: set[tuple[str, str]] = set()
             for item in aliases[:MAX_ALIAS_RESULTS]:
                 speaker_id = item["speaker_id"]
@@ -184,6 +199,9 @@ async def force_alias_analysis(
                     item["alias"],
                     target_id,
                     item["confidence"],
+                    nickname_map.get(speaker_id),
+                    nickname_map.get(target_id),
+                    None,
                     now,
                 )
                 pairs.add((speaker_id, target_id))

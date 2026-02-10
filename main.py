@@ -84,13 +84,14 @@ class AutoImpressionCard(Star):
 
         components = event.get_messages()
         plain_text = extract_plain_text(components)
-        if not plain_text:
+        raw_text = extract_raw_text(components)
+        if not plain_text and not raw_text:
             return
 
-        if len(plain_text) < self.config.ignore_short_text_len:
+        if plain_text and len(plain_text) < self.config.ignore_short_text_len:
             return
 
-        if self._ignore_pattern and self._ignore_pattern.search(plain_text):
+        if plain_text and self._ignore_pattern and self._ignore_pattern.search(plain_text):
             return
 
         ts = int(time.time())
@@ -100,9 +101,9 @@ class AutoImpressionCard(Star):
         await asyncio.to_thread(
             self.store.touch_profile, group_id, user_id, nickname, ts
         )
-        if self._is_command_message(event, plain_text):
+        if plain_text and self._is_command_message(event, plain_text):
             return
-        raw_text = extract_raw_text(components) or plain_text
+        raw_text = raw_text or plain_text
         await asyncio.to_thread(
             self.store.enqueue_message, group_id, user_id, raw_text, ts
         )

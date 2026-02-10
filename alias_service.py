@@ -55,7 +55,13 @@ async def learn_aliases(
     candidates = extract_alias_candidates(event)
     if not candidates:
         return
+    evidence_text = event.get_message_str() or ""
     now = int(time.time())
+    nickname_map = await asyncio.to_thread(
+        store.get_nickname_map,
+        group_id,
+        {speaker_id, *[target_id for _, target_id, _ in candidates]},
+    )
     for alias, target_id, confidence in candidates:
         await asyncio.to_thread(
             store.upsert_alias,
@@ -64,6 +70,9 @@ async def learn_aliases(
             alias,
             target_id,
             confidence,
+            nickname_map.get(speaker_id),
+            nickname_map.get(target_id),
+            evidence_text,
             now,
         )
 

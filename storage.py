@@ -85,8 +85,11 @@ class ImpressionStore:
                 CREATE TABLE IF NOT EXISTS alias_map (
                     group_id TEXT NOT NULL,
                     speaker_id TEXT NOT NULL,
+                    speaker_nickname TEXT,
                     alias TEXT NOT NULL,
                     target_id TEXT NOT NULL,
+                    target_nickname TEXT,
+                    evidence_text TEXT,
                     confidence REAL NOT NULL,
                     updated_at INTEGER NOT NULL,
                     PRIMARY KEY (group_id, speaker_id, alias, target_id)
@@ -325,6 +328,9 @@ class ImpressionStore:
         alias: str,
         target_id: str,
         confidence: float,
+        speaker_nickname: str | None = None,
+        target_nickname: str | None = None,
+        evidence_text: str | None = None,
         ts: int | None = None,
     ) -> None:
         if ts is None:
@@ -332,15 +338,58 @@ class ImpressionStore:
         with self._connect() as conn:
             conn.execute(
                 """
-                INSERT INTO alias_map (group_id, speaker_id, alias, target_id, confidence, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO alias_map (
+                    group_id,
+                    speaker_id,
+                    speaker_nickname,
+                    alias,
+                    target_id,
+                    target_nickname,
+                    evidence_text,
+                    confidence,
+                    updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(group_id, speaker_id, alias, target_id) DO UPDATE SET
+                    speaker_nickname=excluded.speaker_nickname,
+                    target_nickname=excluded.target_nickname,
+                    evidence_text=excluded.evidence_text,
                     confidence=excluded.confidence,
                     updated_at=excluded.updated_at
                 """,
-                (group_id, speaker_id, alias, target_id, confidence, ts),
+                (
+                    group_id,
+                    speaker_id,
+                    speaker_nickname,
+                    alias,
+                    target_id,
+                    target_nickname,
+                    evidence_text,
+                    confidence,
+                    ts,
+                ),
             )
             conn.commit()
+
+    def get_nickname_map(
+        self, group_id: str, user_ids: Iterable[str]
+    ) -> dict[str, str]:
+        ids = [str(uid) for uid in user_ids if str(uid)]
+        if not ids:
+            return {}
+        placeholders = ",".join(["?"] * len(ids))
+        sql = f"""
+            SELECT user_id, nickname
+            FROM profiles
+            WHERE group_id=? AND user_id IN ({placeholders})
+        """
+        with self._connect() as conn:
+            rows = conn.execute(sql, (group_id, *ids)).fetchall()
+            return {
+                row["user_id"]: row["nickname"]
+                for row in rows
+                if row["nickname"]
+            }
 
     def find_alias_targets(
         self, group_id: str, speaker_id: str, alias: str
