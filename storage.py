@@ -365,6 +365,52 @@ class ImpressionStore:
             ).fetchall()
             return [dict(row) for row in rows]
 
+    def get_aliases_by_target(self, group_id: str, target_id: str) -> list[dict]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT speaker_id, alias
+                FROM alias_map
+                WHERE group_id=? AND target_id=?
+                ORDER BY updated_at DESC
+                """,
+                (group_id, target_id),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def prune_aliases(
+        self, group_id: str, speaker_id: str, target_id: str, limit: int
+    ) -> None:
+        if limit <= 0:
+            return
+        with self._connect() as conn:
+            conn.execute(
+                """
+                DELETE FROM alias_map
+                WHERE group_id=? AND speaker_id=? AND target_id=? AND alias IN (
+                    SELECT alias FROM (
+                        SELECT alias,
+                               ROW_NUMBER() OVER (
+                                   ORDER BY confidence DESC, updated_at DESC
+                               ) AS rn
+                        FROM alias_map
+                        WHERE group_id=? AND speaker_id=? AND target_id=?
+                    ) ranked
+                    WHERE rn > ?
+                )
+                """,
+                (
+                    group_id,
+                    speaker_id,
+                    target_id,
+                    group_id,
+                    speaker_id,
+                    target_id,
+                    limit,
+                ),
+            )
+            conn.commit()
+
     @staticmethod
     def _load_list(value: str | None) -> list[str]:
         if not value:

@@ -14,10 +14,12 @@ from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
 
 from .prompts import ALIAS_ANALYSIS_SYSTEM_PROMPT
 from .storage import ImpressionStore
+from .update_service import force_update
 from .utils import extract_json
 
 MAX_ALIAS_PENDING_MESSAGES = 200
 MAX_ALIAS_RESULTS = 100
+MAX_ALIASES_PER_PAIR = 4
 ALIAS_RE = re.compile(r"^[\w\u4e00-\u9fff]{2,8}$")
 
 
@@ -50,9 +52,9 @@ def build_alias_message_for_queue(event: AiocqhttpMessageEvent) -> str:
         return ""
     if reply_to_self:
         return ""
-    if not has_non_self_target:
-        return ""
     if message.startswith("/") or message.startswith("／"):
+        return ""
+    if not has_non_self_target and len(message) < 4:
         return ""
     return message
 
@@ -118,19 +120,41 @@ async def maybe_schedule_alias_analysis(
                 return
 
             now = int(time.time())
+            pairs: set[tuple[str, str]] = set()
             for item in aliases[:MAX_ALIAS_RESULTS]:
+                speaker_id = item["speaker_id"]
+                target_id = item["target_id"]
                 await asyncio.to_thread(
                     store.upsert_alias,
                     group_id,
-                    item["speaker_id"],
+                    speaker_id,
                     item["alias"],
-                    item["target_id"],
+                    target_id,
                     item["confidence"],
                     now,
+                )
+                pairs.add((speaker_id, target_id))
+            for speaker_id, target_id in pairs:
+                await asyncio.to_thread(
+                    store.prune_aliases,
+                    group_id,
+                    speaker_id,
+                    target_id,
+                    MAX_ALIASES_PER_PAIR,
                 )
 
             await asyncio.to_thread(
                 store.delete_alias_messages, [p.id for p in pending]
+            )
+            await _force_updates_for_alias_targets(
+                context,
+                store,
+                config,
+                debug_log,
+                update_locks,
+                group_id,
+                umo,
+                {item["target_id"] for item in aliases},
             )
         except Exception as exc:  # noqa: BLE001
             logger.error(f"Alias analysis failed: {exc}")
@@ -193,24 +217,78 @@ async def force_alias_analysis(
                 return False
 
             now = int(time.time())
+            pairs: set[tuple[str, str]] = set()
             for item in aliases[:MAX_ALIAS_RESULTS]:
+                speaker_id = item["speaker_id"]
+                target_id = item["target_id"]
                 await asyncio.to_thread(
                     store.upsert_alias,
                     group_id,
-                    item["speaker_id"],
+                    speaker_id,
                     item["alias"],
-                    item["target_id"],
+                    target_id,
                     item["confidence"],
                     now,
+                )
+                pairs.add((speaker_id, target_id))
+            for speaker_id, target_id in pairs:
+                await asyncio.to_thread(
+                    store.prune_aliases,
+                    group_id,
+                    speaker_id,
+                    target_id,
+                    MAX_ALIASES_PER_PAIR,
                 )
 
             await asyncio.to_thread(
                 store.delete_alias_messages, [p.id for p in pending]
             )
+            await _force_updates_for_alias_targets(
+                context,
+                store,
+                config,
+                debug_log,
+                update_locks,
+                group_id,
+                umo,
+                {item["target_id"] for item in aliases},
+            )
             return True
         except Exception as exc:  # noqa: BLE001
             logger.error(f"Alias analysis failed: {exc}")
             return False
+
+
+async def _force_updates_for_alias_targets(
+    context,
+    store: ImpressionStore,
+    config,
+    debug_log,
+    update_locks: dict[str, asyncio.Lock],
+    group_id: str,
+    umo: str,
+    target_ids: set[str],
+) -> None:
+    for target_id in target_ids:
+        pending_count = await asyncio.to_thread(
+            store.get_pending_count, group_id, target_id
+        )
+        if pending_count <= 0:
+            continue
+        profile = await asyncio.to_thread(store.get_profile, group_id, target_id)
+        nickname = profile.nickname if profile and profile.nickname else target_id
+        await force_update(
+            context,
+            store,
+            config,
+            debug_log,
+            update_locks,
+            umo,
+            group_id,
+            target_id,
+            nickname,
+            clear_old=False,
+        )
 
 
 def build_alias_prompt(pending) -> str:

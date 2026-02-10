@@ -12,6 +12,9 @@ from astrbot.api.star import Context, Star, register
 from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
     AiocqhttpMessageEvent,
 )
+from astrbot.core.star.filter.command import CommandFilter
+from astrbot.core.star.filter.command_group import CommandGroupFilter
+from astrbot.core.star.star_handler import EventType, star_handlers_registry
 from astrbot.core.utils.path_utils import get_astrbot_plugin_data_path
 
 from .alias_analysis_service import (
@@ -92,6 +95,8 @@ class AutoImpressionCard(Star):
         await asyncio.to_thread(
             self.store.touch_profile, group_id, user_id, nickname, ts
         )
+        if self._is_command_message(event, plain_text):
+            return
         await asyncio.to_thread(
             self.store.enqueue_message, group_id, user_id, plain_text, ts
         )
@@ -212,6 +217,19 @@ class AutoImpressionCard(Star):
         if not profile or not profile.summary:
             return self._tool_result("not_found", "no profile for user")
 
+        alias_rows = await asyncio.to_thread(
+            self.store.get_aliases_by_target, group_id, target_id
+        )
+        aliases_by_speaker: dict[str, list[str]] = {}
+        for row in alias_rows:
+            speaker_id = str(row.get("speaker_id", "")).strip()
+            alias = str(row.get("alias", "")).strip()
+            if not speaker_id or not alias:
+                continue
+            names = aliases_by_speaker.setdefault(speaker_id, [])
+            if alias not in names:
+                names.append(alias)
+
         if detail.strip().lower() == "full":
             result = self._format_profile_for_reply(profile)
         else:
@@ -223,6 +241,7 @@ class AutoImpressionCard(Star):
             "user_id": profile.user_id,
             "nickname": profile.nickname or "",
             "content": result,
+            "aliases_by_speaker": aliases_by_speaker,
         }
         text = json.dumps(payload, ensure_ascii=False)
         if self.config.debug_mode:
@@ -400,6 +419,36 @@ class AutoImpressionCard(Star):
         if ignore_tokens:
             rest = [p for p in rest if p not in ignore_tokens]
         return " ".join(rest).strip()
+
+    def _is_command_message(
+        self, event: AstrMessageEvent, plain_text: str
+    ) -> bool:
+        message = re.sub(r"\s+", " ", plain_text.strip())
+        if not message:
+            return False
+
+        cfg = self.context.get_config(event.unified_msg_origin)
+        wake_prefixes = cfg.get("wake_prefix", [])
+        if isinstance(wake_prefixes, str):
+            wake_prefixes = [wake_prefixes]
+
+        for prefix in wake_prefixes:
+            if prefix and message.startswith(prefix):
+                message = message[len(prefix) :].strip()
+                break
+
+        if not message:
+            return False
+
+        for handler in star_handlers_registry:
+            if handler.event_type != EventType.AdapterMessageEvent:
+                continue
+            for event_filter in handler.event_filters:
+                if isinstance(event_filter, (CommandFilter, CommandGroupFilter)):
+                    for cmd in event_filter.get_complete_command_names():
+                        if message == cmd or message.startswith(f"{cmd} "):
+                            return True
+        return False
 
     def _format_profile_for_reply(self, profile: ProfileRecord) -> str:
         traits = profile.traits[: self.config.inject_max_traits]
