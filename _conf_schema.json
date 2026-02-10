@@ -2,21 +2,12 @@
   "Basic": {
     "description": "基础设置",
     "type": "object",
-    "hint": "插件开关与群白名单",
+    "hint": "插件开关",
     "items": {
       "enabled": {
         "description": "启用插件",
         "type": "bool",
         "default": true
-      },
-      "group_whitelist": {
-        "description": "群白名单",
-        "type": "list",
-        "items": {
-          "type": "string"
-        },
-        "hint": "仅在白名单群内启用（空列表表示全部关闭）",
-        "default": []
       }
     }
   },

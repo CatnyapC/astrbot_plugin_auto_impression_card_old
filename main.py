@@ -59,7 +59,7 @@ class AutoImpressionCard(Star):
             return
 
         group_id = str(event.get_group_id())
-        if not group_id or not self.config.is_group_allowed(group_id):
+        if not group_id:
             return
 
         if str(event.get_sender_id()) == str(event.get_self_id()):
@@ -96,7 +96,7 @@ class AutoImpressionCard(Star):
         if event.get_platform_name() != "aiocqhttp":
             return
         group_id = str(event.get_group_id())
-        if not group_id or not self.config.is_group_allowed(group_id):
+        if not group_id:
             return
 
         user_id = str(event.get_sender_id())
@@ -112,12 +112,13 @@ class AutoImpressionCard(Star):
 
     @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP)
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE)
-    @filter.command("印象")
+    @filter.command("印象", alias={"/印象"})
     async def impression_command(self, event: AiocqhttpMessageEvent):
+        event.should_call_llm(True)
         if not self.config.enabled:
             return
         group_id = str(event.get_group_id())
-        if not group_id or not self.config.is_group_allowed(group_id):
+        if not group_id:
             return
 
         target_id = self._extract_target_id_from_mentions(event)
@@ -141,12 +142,13 @@ class AutoImpressionCard(Star):
 
     @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP)
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE)
-    @filter.command("印象更新")
+    @filter.command("印象更新", alias={"/印象更新"})
     async def impression_update_command(self, event: AiocqhttpMessageEvent):
+        event.should_call_llm(True)
         if not self.config.enabled:
             return
         group_id = str(event.get_group_id())
-        if not group_id or not self.config.is_group_allowed(group_id):
+        if not group_id:
             return
 
         clear_old = "清空" in event.message_str.split()
@@ -485,7 +487,8 @@ class AutoImpressionCard(Star):
             "New messages:",
         ]
         for idx, msg in enumerate(pending, 1):
-            lines.append(f"{idx}. {msg.message}")
+            ts_text = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(msg.ts))
+            lines.append(f"{idx}. [{ts_text}] {msg.message}")
         return "\n".join(lines)
 
     def _parse_profile_json(self, text: str, existing: dict) -> tuple[dict, bool]:
