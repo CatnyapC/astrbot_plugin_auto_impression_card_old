@@ -18,6 +18,14 @@ from astrbot.core.utils.path_utils import get_astrbot_plugin_data_path
 from .config import PluginConfig
 from .prompts import PROFILE_UPDATE_SYSTEM_PROMPT
 from .storage import ImpressionStore, ProfileRecord
+from .utils import (
+    extract_plain_text,
+    is_impression_query,
+    is_self_profile_query,
+    last_token,
+    parse_profile_json,
+    token_count,
+)
 
 PLUGIN_NAME = "astrbot_plugin_auto_impression_card"
 MAX_PENDING_MESSAGES = 200
@@ -65,7 +73,7 @@ class AutoImpressionCard(Star):
         if str(event.get_sender_id()) == str(event.get_self_id()):
             return
 
-        plain_text = self._extract_plain_text(event.get_messages())
+        plain_text = extract_plain_text(event.get_messages())
         if not plain_text:
             return
 
@@ -102,7 +110,7 @@ class AutoImpressionCard(Star):
         user_id = str(event.get_sender_id())
         injections: list[str] = []
         message_text = event.get_message_str() or ""
-        needs_tool = self._is_impression_query(message_text)
+        needs_tool = is_impression_query(message_text)
 
         if not needs_tool:
             profile = await asyncio.to_thread(self.store.get_profile, group_id, user_id)
@@ -219,7 +227,7 @@ class AutoImpressionCard(Star):
                 else:
                     return self._tool_result("not_found", "no profile for alias")
 
-        if target_id == speaker_id and not self._is_self_profile_query(message_text):
+        if target_id == speaker_id and not is_self_profile_query(message_text):
             return self._tool_result(
                 "not_allowed",
                 "current speaker not allowed unless explicitly requested",
@@ -411,9 +419,7 @@ class AutoImpressionCard(Star):
                     "[AIC] Update raw response:\n"
                     + (resp.completion_text or "")
                 )
-                data, ok = self._parse_profile_json(
-                    resp.completion_text or "", existing
-                )
+                data, ok = parse_profile_json(resp.completion_text or "", existing)
                 if not ok:
                     logger.warning(
                         "LLM update returned invalid JSON, keeping pending messages"
@@ -494,7 +500,7 @@ class AutoImpressionCard(Star):
                 logger.error(f"LLM update call failed: {exc}")
                 return False
 
-            data, ok = self._parse_profile_json(resp.completion_text or "", existing)
+            data, ok = parse_profile_json(resp.completion_text or "", existing)
             if not ok:
                 logger.warning("LLM update returned invalid JSON")
                 return False
@@ -551,16 +557,6 @@ class AutoImpressionCard(Star):
             return str(candidates[0]["target_id"])
         return None
 
-    @staticmethod
-    def _extract_plain_text(components) -> str:
-        parts: list[str] = []
-        for comp in components:
-            if isinstance(comp, Plain):
-                text = comp.text.strip()
-                if text:
-                    parts.append(text)
-        return " ".join(parts).strip()
-
     def _extract_alias_candidates(self, event: AiocqhttpMessageEvent):
         components = event.get_messages()
         candidates: list[tuple[str, str, float]] = []
@@ -570,7 +566,7 @@ class AutoImpressionCard(Star):
             if isinstance(comp, Plain):
                 buffer += comp.text
             elif isinstance(comp, At):
-                alias = self._last_token(buffer)
+                alias = last_token(buffer)
                 if alias:
                     candidates.append((alias, str(comp.qq), 0.9))
                 buffer = ""
@@ -580,8 +576,8 @@ class AutoImpressionCard(Star):
         if not candidates:
             reply_target = self._extract_reply_target_id(event)
             if reply_target:
-                alias = self._last_token(buffer)
-                if alias and self._token_count(buffer) <= 2:
+                alias = last_token(buffer)
+                if alias and token_count(buffer) <= 2:
                     candidates.append((alias, reply_target, 0.7))
 
         return candidates
@@ -612,18 +608,6 @@ class AutoImpressionCard(Star):
             rest = [p for p in rest if p not in ignore_tokens]
         return " ".join(rest).strip()
 
-    @staticmethod
-    def _last_token(text: str) -> str:
-        tokens = re.findall(r"[\w\u4e00-\u9fff]+", text)
-        if not tokens:
-            return ""
-        token = tokens[-1].strip()
-        return token if len(token) >= 2 else ""
-
-    @staticmethod
-    def _token_count(text: str) -> int:
-        return len(re.findall(r"[\w\u4e00-\u9fff]+", text))
-
     def _build_update_prompt(self, existing: dict, pending) -> str:
         lines = [
             "Existing profile (JSON):",
@@ -635,44 +619,6 @@ class AutoImpressionCard(Star):
             ts_text = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(msg.ts))
             lines.append(f"{idx}. [{ts_text}] {msg.message}")
         return "\n".join(lines)
-
-    def _parse_profile_json(self, text: str, existing: dict) -> tuple[dict, bool]:
-        raw = self._extract_json(text)
-        if not raw:
-            return {}, False
-        try:
-            data = json.loads(raw)
-        except json.JSONDecodeError:
-            return {}, False
-
-        summary = str(data.get("summary", "")).strip() or existing.get("summary", "")
-        traits = data.get("traits")
-        facts = data.get("facts")
-        examples = data.get("examples")
-
-        return (
-            {
-                "summary": summary,
-                "traits": self._safe_list(traits, existing.get("traits", [])),
-                "facts": self._safe_list(facts, existing.get("facts", [])),
-                "examples": self._safe_list(examples, existing.get("examples", [])),
-            },
-            True,
-        )
-
-    @staticmethod
-    def _safe_list(value, fallback: list[str]) -> list[str]:
-        if isinstance(value, list) and value:
-            return [str(x) for x in value]
-        return fallback
-
-    @staticmethod
-    def _extract_json(text: str) -> str:
-        start = text.find("{")
-        end = text.rfind("}")
-        if start == -1 or end == -1 or end <= start:
-            return ""
-        return text[start : end + 1]
 
     def _format_profile_for_injection(self, profile: ProfileRecord) -> str:
         summary = (profile.summary or "").strip()
@@ -704,49 +650,6 @@ class AutoImpressionCard(Star):
     def _debug_log(self, message: str) -> None:
         if self.config.debug_mode:
             logger.info(message)
-
-    @staticmethod
-    def _is_impression_query(text: str) -> bool:
-        if not text:
-            return False
-        patterns = [
-            "印象",
-            "记得",
-            "回忆",
-            "回想",
-            "了解",
-            "认识",
-            "评价",
-            "看法",
-            "印记",
-            "档案",
-            "资料",
-            "卡片",
-            "人物",
-            "身份",
-            "角色",
-            "关系",
-            "背景",
-            "喜欢",
-            "爱吃",
-            "偏好",
-            "兴趣",
-            "性格",
-            "特征",
-            "是谁",
-            "什么样",
-        ]
-        return any(p in text for p in patterns)
-
-    @staticmethod
-    def _is_self_profile_query(text: str) -> bool:
-        if not text:
-            return False
-        patterns = [
-            r"(我|本人|自己).{0,6}(印象|记得|回忆|了解|评价|认识|是谁|什么样|资料|档案)",
-            r"(印象|记得|回忆|了解|评价|认识).{0,6}(我|本人|自己)",
-        ]
-        return any(re.search(p, text) for p in patterns)
 
     @staticmethod
     def _tool_result(status: str, message: str, extra: str | None = None) -> str:
