@@ -9,27 +9,26 @@ from pathlib import Path
 from astrbot.api import AstrBotConfig, llm_tool, logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star, register
-from astrbot.core.message.components import At, Plain, Reply
 from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
     AiocqhttpMessageEvent,
 )
 from astrbot.core.utils.path_utils import get_astrbot_plugin_data_path
 
+from .alias_service import (
+    extract_target_id_from_mentions,
+    learn_aliases,
+    resolve_alias,
+)
 from .config import PluginConfig
-from .prompts import PROFILE_UPDATE_SYSTEM_PROMPT
+from .injection import apply_injection, format_profile_for_injection
 from .storage import ImpressionStore, ProfileRecord
+from .update_service import force_update, maybe_schedule_update
 from .utils import (
     extract_plain_text,
-    is_impression_query,
     is_self_profile_query,
-    last_token,
-    parse_profile_json,
-    token_count,
 )
 
 PLUGIN_NAME = "astrbot_plugin_auto_impression_card"
-MAX_PENDING_MESSAGES = 200
-
 
 @register(
     PLUGIN_NAME,
@@ -94,8 +93,21 @@ class AutoImpressionCard(Star):
             self.store.enqueue_message, group_id, user_id, plain_text, ts
         )
 
-        await self._learn_aliases(event, group_id, user_id)
-        await self._maybe_schedule_update(event, group_id, user_id, nickname)
+        await learn_aliases(event, self.store, group_id, user_id)
+        asyncio.create_task(
+            maybe_schedule_update(
+                self.context,
+                self.store,
+                self.config,
+                self._debug_log,
+                self._active_updates,
+                self._update_locks,
+                group_id,
+                user_id,
+                nickname,
+                event.unified_msg_origin,
+            )
+        )
 
     @filter.on_llm_request()
     async def inject_profile(self, event: AstrMessageEvent, request):
@@ -103,72 +115,13 @@ class AutoImpressionCard(Star):
             return
         if event.get_platform_name() != "aiocqhttp":
             return
-        group_id = str(event.get_group_id())
-        if not group_id:
-            return
-
-        user_id = str(event.get_sender_id())
-        injections: list[str] = []
-        message_text = event.get_message_str() or ""
-        needs_tool = is_impression_query(message_text)
-
-        if not needs_tool:
-            profile = await asyncio.to_thread(self.store.get_profile, group_id, user_id)
-            if profile and profile.summary:
-                injection = self._format_profile_for_injection(profile)
-                if injection:
-                    injections.append(injection)
-                    self._debug_log(
-                        f"[AIC] Injecting profile for user={user_id}, group={group_id}:\n{injection}"
-                    )
-
-            # If user mentions someone, inject that member's profile as well.
-            if isinstance(event, AiocqhttpMessageEvent):
-                target_id = self._extract_target_id_from_mentions(event)
-                if target_id and str(target_id) != user_id:
-                    target_profile = await asyncio.to_thread(
-                        self.store.get_profile, group_id, str(target_id)
-                    )
-                    if target_profile and target_profile.summary:
-                        target_injection = self._format_profile_for_injection(
-                            target_profile
-                        )
-                        if target_injection:
-                            injections.append(target_injection)
-                            self._debug_log(
-                                "[AIC] Injecting mentioned profile "
-                                f"target={target_id}, group={group_id}:\n{target_injection}"
-                            )
-
-        tool_guidance = (
-            "[AIC Tool Guidance]\n"
-            "当用户询问某个群友的印象、回忆、评价、了解、关系、兴趣、偏好、"
-            "身份/角色等，或需要你基于档案回答时，必须先调用工具 "
-            "`get_impression_profile` 获取档案，再作答。\n"
-            "若用户提及具体对象，请使用对方的昵称/别名作为 `target` 参数。\n"
-            "本轮请先调用工具，不要先给出用户可见的回答。\n"
-            "除非用户明确要求（例如“对我/我自己”），否则不要对当前发起者调用该工具。\n"
-            "若只涉及被提及对象，仅调用一次工具即可。\n"
-            "如果工具返回 not_found/ambiguous，请向用户澄清后再答复，不要编造。"
+        await apply_injection(
+            event,
+            request,
+            self.store,
+            self.config,
+            self.config.debug_mode,
         )
-
-        if injections:
-            speaker_name = event.get_sender_name() or user_id
-            guard = (
-                "[AIC Notice]\n"
-                f"当前发起者是：{speaker_name}（{user_id}）。\n"
-                "必须优先回应当前发起者，群友印象仅供参考，不得覆盖当前发起者。\n"
-                "如提及他人，仅在不影响对当前发起者的回应前提下参考其印象。"
-            )
-            request.system_prompt = (
-                (request.system_prompt or "")
-                + "\n\n"
-                + guard
-                + "\n\n"
-                + "\n\n".join(injections)
-            )
-        if needs_tool:
-            request.system_prompt = (request.system_prompt or "") + "\n\n" + tool_guidance
 
     @llm_tool(name="get_impression_profile")
     async def get_impression_profile(
@@ -240,7 +193,7 @@ class AutoImpressionCard(Star):
         if detail.strip().lower() == "full":
             result = self._format_profile_for_reply(profile)
         else:
-            result = self._format_profile_for_injection(profile)
+            result = format_profile_for_injection(profile, self.config.inject_max_chars)
 
         payload = {
             "status": "ok",
@@ -267,12 +220,12 @@ class AutoImpressionCard(Star):
         if not group_id:
             return
 
-        target_id = self._extract_target_id_from_mentions(event)
+        target_id = extract_target_id_from_mentions(event)
         if not target_id:
             alias = self._extract_alias_from_command(event.message_str)
             if alias:
-                target_id = await self._resolve_alias(
-                    group_id, str(event.get_sender_id()), alias
+                target_id = await resolve_alias(
+                    self.store, group_id, str(event.get_sender_id()), alias
                 )
 
         if not target_id:
@@ -298,14 +251,14 @@ class AutoImpressionCard(Star):
             return
 
         clear_old = "清空" in event.message_str.split()
-        target_id = self._extract_target_id_from_mentions(event)
+        target_id = extract_target_id_from_mentions(event)
         if not target_id:
             alias = self._extract_alias_from_command(
                 event.message_str, ignore_tokens={"清空"}
             )
             if alias:
-                target_id = await self._resolve_alias(
-                    group_id, str(event.get_sender_id()), alias
+                target_id = await resolve_alias(
+                    self.store, group_id, str(event.get_sender_id()), alias
                 )
 
         if not target_id:
@@ -314,7 +267,12 @@ class AutoImpressionCard(Star):
         nickname = event.get_sender_name() or target_id
 
         yield event.plain_result("正在强制更新印象档案...")
-        ok = await self._force_update(
+        ok = await force_update(
+            self.context,
+            self.store,
+            self.config,
+            self._debug_log,
+            self._update_locks,
             event.unified_msg_origin,
             group_id,
             target_id,
@@ -326,277 +284,6 @@ class AutoImpressionCard(Star):
         else:
             yield event.plain_result("印象档案更新失败，请稍后重试")
 
-    async def _maybe_schedule_update(
-        self,
-        event: AiocqhttpMessageEvent,
-        group_id: str,
-        user_id: str,
-        nickname: str,
-    ) -> None:
-        pending_count = await asyncio.to_thread(
-            self.store.get_pending_count, group_id, user_id
-        )
-        if pending_count <= 0:
-            return
-
-        profile = await asyncio.to_thread(self.store.get_profile, group_id, user_id)
-        last_updated = profile.updated_at if profile and profile.updated_at else 0
-        now = int(time.time())
-
-        should_update = pending_count >= self.config.update_msg_threshold
-        should_update = should_update or (
-            now - last_updated >= self.config.update_time_threshold_sec
-        )
-
-        if not should_update:
-            return
-
-        key = f"{group_id}:{user_id}"
-        if key in self._active_updates:
-            return
-        self._active_updates.add(key)
-        asyncio.create_task(
-            self._run_update(
-                key,
-                event.unified_msg_origin,
-                group_id,
-                user_id,
-                nickname,
-            )
-        )
-
-    async def _run_update(
-        self,
-        key: str,
-        umo: str,
-        group_id: str,
-        user_id: str,
-        nickname: str,
-    ) -> None:
-        lock = self._update_locks.setdefault(key, asyncio.Lock())
-        async with lock:
-            try:
-                pending = await asyncio.to_thread(
-                    self.store.get_pending_messages,
-                    group_id,
-                    user_id,
-                    MAX_PENDING_MESSAGES,
-                )
-                if not pending:
-                    return
-
-                profile = await asyncio.to_thread(self.store.get_profile, group_id, user_id)
-                existing = {
-                    "summary": profile.summary if profile else "",
-                    "traits": profile.traits if profile else [],
-                    "facts": profile.facts if profile else [],
-                    "examples": profile.examples if profile else [],
-                }
-
-                try:
-                    provider = self.context.get_using_provider(umo=umo)
-                except ValueError as exc:
-                    logger.warning(f"No LLM provider configured: {exc}")
-                    return
-                if not provider:
-                    logger.warning("No LLM provider configured for impression update")
-                    return
-
-                prompt = self._build_update_prompt(existing, pending)
-                self._debug_log(
-                    "[AIC] Update prompt:\n" + prompt
-                )
-                try:
-                    resp = await provider.text_chat(
-                        system_prompt=PROFILE_UPDATE_SYSTEM_PROMPT,
-                        prompt=prompt,
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    logger.error(f"LLM update call failed: {exc}")
-                    return
-
-                self._debug_log(
-                    "[AIC] Update raw response:\n"
-                    + (resp.completion_text or "")
-                )
-                data, ok = parse_profile_json(resp.completion_text or "", existing)
-                if not ok:
-                    logger.warning(
-                        "LLM update returned invalid JSON, keeping pending messages"
-                    )
-                    return
-
-                updated_at = int(time.time())
-                last_seen = max(p.ts for p in pending)
-                record = ProfileRecord(
-                    group_id=group_id,
-                    user_id=user_id,
-                    nickname=profile.nickname if profile and profile.nickname else nickname,
-                    last_seen=last_seen,
-                    summary=data["summary"],
-                    traits=data["traits"],
-                    facts=data["facts"],
-                    examples=data["examples"],
-                    updated_at=updated_at,
-                    version=(profile.version if profile else 1),
-                )
-                await asyncio.to_thread(self.store.upsert_profile, record)
-                await asyncio.to_thread(
-                    self.store.delete_pending_messages, [p.id for p in pending]
-                )
-            except Exception as exc:  # noqa: BLE001
-                logger.error(f"Impression update failed: {exc}")
-            finally:
-                self._active_updates.discard(key)
-
-    async def _force_update(
-        self,
-        umo: str,
-        group_id: str,
-        user_id: str,
-        nickname: str,
-        clear_old: bool,
-    ) -> bool:
-        key = f"{group_id}:{user_id}"
-        lock = self._update_locks.setdefault(key, asyncio.Lock())
-        async with lock:
-            pending = await asyncio.to_thread(
-                self.store.get_pending_messages,
-                group_id,
-                user_id,
-                MAX_PENDING_MESSAGES,
-            )
-            profile = await asyncio.to_thread(self.store.get_profile, group_id, user_id)
-            existing = {
-                "summary": "",
-                "traits": [],
-                "facts": [],
-                "examples": [],
-            }
-            if profile and not clear_old:
-                existing = {
-                    "summary": profile.summary or "",
-                    "traits": profile.traits,
-                    "facts": profile.facts,
-                    "examples": profile.examples,
-                }
-
-            try:
-                provider = self.context.get_using_provider(umo=umo)
-            except ValueError as exc:
-                logger.warning(f"No LLM provider configured: {exc}")
-                return False
-            if not provider:
-                logger.warning("No LLM provider configured for impression update")
-                return False
-
-            prompt = self._build_update_prompt(existing, pending)
-            try:
-                resp = await provider.text_chat(
-                    system_prompt=PROFILE_UPDATE_SYSTEM_PROMPT,
-                    prompt=prompt,
-                )
-            except Exception as exc:  # noqa: BLE001
-                logger.error(f"LLM update call failed: {exc}")
-                return False
-
-            data, ok = parse_profile_json(resp.completion_text or "", existing)
-            if not ok:
-                logger.warning("LLM update returned invalid JSON")
-                return False
-
-            updated_at = int(time.time())
-            last_seen = max([p.ts for p in pending], default=updated_at)
-            record = ProfileRecord(
-                group_id=group_id,
-                user_id=user_id,
-                nickname=profile.nickname if profile and profile.nickname else nickname,
-                last_seen=last_seen,
-                summary=data["summary"],
-                traits=data["traits"],
-                facts=data["facts"],
-                examples=data["examples"],
-                updated_at=updated_at,
-                version=(profile.version if profile else 1),
-            )
-            await asyncio.to_thread(self.store.upsert_profile, record)
-
-            if pending:
-                await asyncio.to_thread(
-                    self.store.delete_pending_messages, [p.id for p in pending]
-                )
-            return True
-
-    async def _learn_aliases(
-        self, event: AiocqhttpMessageEvent, group_id: str, speaker_id: str
-    ) -> None:
-        candidates = self._extract_alias_candidates(event)
-        if not candidates:
-            return
-        now = int(time.time())
-        for alias, target_id, confidence in candidates:
-            await asyncio.to_thread(
-                self.store.upsert_alias,
-                group_id,
-                speaker_id,
-                alias,
-                target_id,
-                confidence,
-                now,
-            )
-
-    async def _resolve_alias(
-        self, group_id: str, speaker_id: str, alias: str
-    ) -> str | None:
-        candidates = await asyncio.to_thread(
-            self.store.find_alias_targets, group_id, speaker_id, alias
-        )
-        if not candidates:
-            return None
-        if len(candidates) == 1:
-            return str(candidates[0]["target_id"])
-        return None
-
-    def _extract_alias_candidates(self, event: AiocqhttpMessageEvent):
-        components = event.get_messages()
-        candidates: list[tuple[str, str, float]] = []
-        buffer = ""
-
-        for comp in components:
-            if isinstance(comp, Plain):
-                buffer += comp.text
-            elif isinstance(comp, At):
-                alias = last_token(buffer)
-                if alias:
-                    candidates.append((alias, str(comp.qq), 0.9))
-                buffer = ""
-            elif isinstance(comp, Reply):
-                buffer += " "
-
-        if not candidates:
-            reply_target = self._extract_reply_target_id(event)
-            if reply_target:
-                alias = last_token(buffer)
-                if alias and token_count(buffer) <= 2:
-                    candidates.append((alias, reply_target, 0.7))
-
-        return candidates
-
-    @staticmethod
-    def _extract_target_id_from_mentions(event: AiocqhttpMessageEvent) -> str | None:
-        for comp in event.get_messages():
-            if isinstance(comp, At) and str(comp.qq) != str(event.get_self_id()):
-                return str(comp.qq)
-        return None
-
-    @staticmethod
-    def _extract_reply_target_id(event: AiocqhttpMessageEvent) -> str | None:
-        for comp in event.get_messages():
-            if isinstance(comp, Reply) and comp.sender_id is not None:
-                return str(comp.sender_id)
-        return None
-
-    @staticmethod
     def _extract_alias_from_command(
         message_str: str, ignore_tokens: set[str] | None = None
     ) -> str:
@@ -607,33 +294,6 @@ class AutoImpressionCard(Star):
         if ignore_tokens:
             rest = [p for p in rest if p not in ignore_tokens]
         return " ".join(rest).strip()
-
-    def _build_update_prompt(self, existing: dict, pending) -> str:
-        lines = [
-            "Existing profile (JSON):",
-            json.dumps(existing, ensure_ascii=False),
-            "",
-            "New messages:",
-        ]
-        for idx, msg in enumerate(pending, 1):
-            ts_text = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(msg.ts))
-            lines.append(f"{idx}. [{ts_text}] {msg.message}")
-        return "\n".join(lines)
-
-    def _format_profile_for_injection(self, profile: ProfileRecord) -> str:
-        summary = (profile.summary or "").strip()
-        if not summary:
-            return ""
-        if len(summary) > self.config.inject_max_chars:
-            summary = summary[: self.config.inject_max_chars].rstrip() + "..."
-
-        parts = [
-            "[Group Member Impression]",
-            f"User ID: {profile.user_id}",
-            f"Nickname: {profile.nickname or ''}",
-            f"Summary: {summary}",
-        ]
-        return "\n".join(parts)
 
     def _format_profile_for_reply(self, profile: ProfileRecord) -> str:
         traits = profile.traits[: self.config.inject_max_traits]

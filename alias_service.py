@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 
 from astrbot.core.message.components import At, Plain, Reply
 from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
@@ -20,7 +21,7 @@ async def learn_aliases(
     candidates = extract_alias_candidates(event)
     if not candidates:
         return
-    now = int(event.get_time() or 0)
+    now = int(time.time())
     for alias, target_id, confidence in candidates:
         await asyncio.to_thread(
             store.upsert_alias,

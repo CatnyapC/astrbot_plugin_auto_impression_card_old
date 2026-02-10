@@ -24,8 +24,6 @@ async def maybe_schedule_update(
     nickname: str,
     umo: str,
 ) -> None:
-    if not config.auto_update_enabled:
-        return
     key = f"{group_id}:{user_id}"
     if key in active_updates:
         return
@@ -47,8 +45,8 @@ async def maybe_schedule_update(
             last_seen = max(p.ts for p in pending)
             pending_count = len(pending)
 
-            if pending_count < config.update_threshold_count:
-                if last_seen - last_update < config.update_threshold_seconds:
+            if pending_count < config.update_msg_threshold:
+                if last_seen - last_update < config.update_time_threshold_sec:
                     return
 
             existing = {
@@ -155,6 +153,7 @@ async def force_update(
             return False
 
         prompt = build_update_prompt(existing, pending)
+        debug_log("[AIC] Force update prompt:\n" + prompt)
         try:
             resp = await provider.text_chat(
                 system_prompt=PROFILE_UPDATE_SYSTEM_PROMPT,
@@ -164,6 +163,7 @@ async def force_update(
             logger.error(f"LLM update call failed: {exc}")
             return False
 
+        debug_log("[AIC] Force update raw response:\n" + (resp.completion_text or ""))
         data, ok = parse_profile_json(resp.completion_text or "", existing)
         if not ok:
             logger.warning("LLM update returned invalid JSON")
