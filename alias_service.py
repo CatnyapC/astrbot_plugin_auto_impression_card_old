@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 
 from astrbot.core.message.components import At, Plain, Reply
@@ -10,6 +11,39 @@ from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
 
 from .storage import ImpressionStore
 from .utils import last_token, token_count
+
+_ALIAS_MIN_LEN = 2
+_ALIAS_MAX_LEN = 8
+_ALIAS_MAX_BUFFER_LEN = 12
+_ALIAS_MAX_TOKENS = 2
+_ALIAS_CORE_RE = re.compile(r"^[\w\u4e00-\u9fff]+$")
+_ALIAS_PUNCT_RE = re.compile(r"[，。！？,!.?;；:：]+$")
+
+
+def _strip_trailing_punct(text: str) -> str:
+    return _ALIAS_PUNCT_RE.sub("", text.strip())
+
+
+def _is_plausible_alias(alias: str, buffer_text: str, *, strict: bool) -> bool:
+    alias = alias.strip()
+    if not alias:
+        return False
+    if len(alias) < _ALIAS_MIN_LEN or len(alias) > _ALIAS_MAX_LEN:
+        return False
+    if not _ALIAS_CORE_RE.fullmatch(alias):
+        return False
+    buffer_text = buffer_text.strip()
+    if not buffer_text:
+        return False
+    if len(buffer_text) > _ALIAS_MAX_BUFFER_LEN:
+        return False
+    if token_count(buffer_text) > _ALIAS_MAX_TOKENS:
+        return False
+
+    buffer_core = _strip_trailing_punct(buffer_text)
+    if strict:
+        return buffer_core == alias
+    return buffer_core.endswith(alias)
 
 
 async def learn_aliases(
@@ -71,7 +105,7 @@ def extract_alias_candidates(event: AiocqhttpMessageEvent):
             buffer += comp.text
         elif isinstance(comp, At):
             alias = last_token(buffer)
-            if alias:
+            if alias and _is_plausible_alias(alias, buffer, strict=False):
                 candidates.append((alias, str(comp.qq), 0.9))
             buffer = ""
         elif isinstance(comp, Reply):
@@ -81,7 +115,7 @@ def extract_alias_candidates(event: AiocqhttpMessageEvent):
         reply_target = extract_reply_target_id(event)
         if reply_target:
             alias = last_token(buffer)
-            if alias and token_count(buffer) <= 2:
+            if alias and _is_plausible_alias(alias, buffer, strict=True):
                 candidates.append((alias, reply_target, 0.7))
 
     return candidates

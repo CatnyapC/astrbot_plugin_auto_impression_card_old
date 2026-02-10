@@ -4,6 +4,7 @@ import asyncio
 import time
 
 from astrbot.api import logger
+from astrbot.core.exceptions import ProviderNotFoundError
 
 from .prompts import PROFILE_UPDATE_SYSTEM_PROMPT
 from .storage import ImpressionStore, ProfileRecord
@@ -57,21 +58,25 @@ async def maybe_schedule_update(
             }
 
             try:
-                provider = context.get_using_provider(umo=umo)
-            except ValueError as exc:
+                provider_id = (
+                    config.update_provider_id
+                    or await context.get_current_chat_provider_id(umo=umo)
+                )
+            except ProviderNotFoundError as exc:
                 logger.warning(f"No LLM provider configured: {exc}")
-                return
-            if not provider:
-                logger.warning("No LLM provider configured for impression update")
                 return
 
             prompt = build_update_prompt(existing, pending)
             debug_log("[AIC] Update prompt:\n" + prompt)
             try:
-                resp = await provider.text_chat(
+                resp = await context.llm_generate(
+                    chat_provider_id=provider_id,
                     system_prompt=PROFILE_UPDATE_SYSTEM_PROMPT,
                     prompt=prompt,
                 )
+            except ProviderNotFoundError as exc:
+                logger.warning(f"Provider not found for impression update: {exc}")
+                return
             except Exception as exc:  # noqa: BLE001
                 logger.error(f"LLM update call failed: {exc}")
                 return
@@ -144,21 +149,25 @@ async def force_update(
             }
 
         try:
-            provider = context.get_using_provider(umo=umo)
-        except ValueError as exc:
+            provider_id = (
+                config.update_provider_id
+                or await context.get_current_chat_provider_id(umo=umo)
+            )
+        except ProviderNotFoundError as exc:
             logger.warning(f"No LLM provider configured: {exc}")
-            return False
-        if not provider:
-            logger.warning("No LLM provider configured for impression update")
             return False
 
         prompt = build_update_prompt(existing, pending)
         debug_log("[AIC] Force update prompt:\n" + prompt)
         try:
-            resp = await provider.text_chat(
+            resp = await context.llm_generate(
+                chat_provider_id=provider_id,
                 system_prompt=PROFILE_UPDATE_SYSTEM_PROMPT,
                 prompt=prompt,
             )
+        except ProviderNotFoundError as exc:
+            logger.warning(f"Provider not found for impression update: {exc}")
+            return False
         except Exception as exc:  # noqa: BLE001
             logger.error(f"LLM update call failed: {exc}")
             return False

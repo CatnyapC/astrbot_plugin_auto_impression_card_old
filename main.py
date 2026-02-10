@@ -14,11 +14,11 @@ from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
 )
 from astrbot.core.utils.path_utils import get_astrbot_plugin_data_path
 
-from .alias_service import (
-    extract_target_id_from_mentions,
-    learn_aliases,
-    resolve_alias,
+from .alias_analysis_service import (
+    build_alias_message_for_queue,
+    maybe_schedule_alias_analysis,
 )
+from .alias_service import extract_target_id_from_mentions, resolve_alias
 from .config import PluginConfig
 from .injection import apply_injection, format_profile_for_injection
 from .storage import ImpressionStore, ProfileRecord
@@ -52,6 +52,8 @@ class AutoImpressionCard(Star):
         self.store.initialize()
         self._active_updates: set[str] = set()
         self._update_locks: dict[str, asyncio.Lock] = {}
+        self._alias_active_updates: set[str] = set()
+        self._alias_update_locks: dict[str, asyncio.Lock] = {}
 
     async def initialize(self):
         logger.info("Auto Impression Card plugin initialized")
@@ -92,8 +94,27 @@ class AutoImpressionCard(Star):
         await asyncio.to_thread(
             self.store.enqueue_message, group_id, user_id, plain_text, ts
         )
-
-        await learn_aliases(event, self.store, group_id, user_id)
+        alias_message = build_alias_message_for_queue(event)
+        if alias_message:
+            await asyncio.to_thread(
+                self.store.enqueue_alias_message,
+                group_id,
+                user_id,
+                alias_message,
+                ts,
+            )
+            asyncio.create_task(
+                maybe_schedule_alias_analysis(
+                    self.context,
+                    self.store,
+                    self.config,
+                    self._debug_log,
+                    self._alias_active_updates,
+                    self._alias_update_locks,
+                    group_id,
+                    event.unified_msg_origin,
+                )
+            )
         asyncio.create_task(
             maybe_schedule_update(
                 self.context,
@@ -283,6 +304,63 @@ class AutoImpressionCard(Star):
             yield event.plain_result("印象档案已更新")
         else:
             yield event.plain_result("印象档案更新失败，请稍后重试")
+
+    @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP)
+    @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE)
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.regex(r".*(更新|刷新|修改|补充|调整).*(印象).*")
+    async def impression_update_nl(self, event: AiocqhttpMessageEvent):
+        event.should_call_llm(True)
+        if not self.config.enabled:
+            return
+        message_text = event.message_str.strip()
+        if message_text.startswith(("印象更新", "/印象更新")):
+            return
+        group_id = str(event.get_group_id())
+        if not group_id:
+            return
+
+        target_id = extract_target_id_from_mentions(event)
+        if not target_id:
+            target_text = self._extract_target_from_update_phrase(event.message_str)
+            if target_text:
+                if target_text.isdigit():
+                    target_id = target_text
+                else:
+                    target_id = await resolve_alias(
+                        self.store, group_id, str(event.get_sender_id()), target_text
+                    )
+
+        if not target_id:
+            yield event.plain_result("请 @群友 或提供昵称")
+            return
+
+        nickname = event.get_sender_name() or target_id
+        yield event.plain_result("正在强制更新印象档案...")
+        ok = await force_update(
+            self.context,
+            self.store,
+            self.config,
+            self._debug_log,
+            self._update_locks,
+            event.unified_msg_origin,
+            group_id,
+            target_id,
+            nickname,
+            clear_old=False,
+        )
+        if ok:
+            yield event.plain_result("印象档案已更新")
+        else:
+            yield event.plain_result("印象档案更新失败，请稍后重试")
+
+    @staticmethod
+    def _extract_target_from_update_phrase(message_str: str) -> str:
+        text = message_str.strip()
+        match = re.search(r"对(?P<name>[^\s@]{1,12})的?印象", text)
+        if match:
+            return match.group("name").strip()
+        return ""
 
     def _extract_alias_from_command(
         message_str: str, ignore_tokens: set[str] | None = None

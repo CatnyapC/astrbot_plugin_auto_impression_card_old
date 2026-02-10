@@ -70,7 +70,10 @@ def is_impression_query(text: str) -> bool:
         "性格",
         "特征",
         "是谁",
+        "谁是",
+        "有谁",
         "什么样",
+        "种族"
     ]
     return any(p in text for p in patterns)
 

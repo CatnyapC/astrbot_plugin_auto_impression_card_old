@@ -29,6 +29,15 @@ class PendingMessage:
     ts: int
 
 
+@dataclass(slots=True)
+class AliasMessage:
+    id: int
+    group_id: str
+    speaker_id: str
+    message: str
+    ts: int
+
+
 class ImpressionStore:
     def __init__(self, db_path: Path) -> None:
         self.db_path = db_path
@@ -88,6 +97,23 @@ class ImpressionStore:
                 """
                 CREATE INDEX IF NOT EXISTS idx_alias_lookup
                 ON alias_map (group_id, speaker_id, alias)
+                """
+            )
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS alias_queue (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    group_id TEXT NOT NULL,
+                    speaker_id TEXT NOT NULL,
+                    message TEXT NOT NULL,
+                    ts INTEGER NOT NULL
+                )
+                """
+            )
+            cur.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_alias_queue_group
+                ON alias_queue (group_id, ts)
                 """
             )
             conn.commit()
@@ -160,6 +186,55 @@ class ImpressionStore:
             return
         placeholders = ",".join(["?"] * len(ids))
         sql = f"DELETE FROM message_queue WHERE id IN ({placeholders})"
+        with self._connect() as conn:
+            conn.execute(sql, ids)
+            conn.commit()
+
+    def enqueue_alias_message(
+        self, group_id: str, speaker_id: str, message: str, ts: int
+    ) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO alias_queue (group_id, speaker_id, message, ts)
+                VALUES (?, ?, ?, ?)
+                """,
+                (group_id, speaker_id, message, ts),
+            )
+            conn.commit()
+
+    def get_alias_messages(
+        self, group_id: str, limit: int | None = None
+    ) -> list[AliasMessage]:
+        sql = """
+            SELECT id, group_id, speaker_id, message, ts
+            FROM alias_queue
+            WHERE group_id=?
+            ORDER BY ts ASC, id ASC
+        """
+        params: tuple = (group_id,)
+        if limit is not None:
+            sql += " LIMIT ?"
+            params = (group_id, limit)
+        with self._connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
+            return [
+                AliasMessage(
+                    id=row["id"],
+                    group_id=row["group_id"],
+                    speaker_id=row["speaker_id"],
+                    message=row["message"],
+                    ts=row["ts"],
+                )
+                for row in rows
+            ]
+
+    def delete_alias_messages(self, ids: Iterable[int]) -> None:
+        ids = list(ids)
+        if not ids:
+            return
+        placeholders = ",".join(["?"] * len(ids))
+        sql = f"DELETE FROM alias_queue WHERE id IN ({placeholders})"
         with self._connect() as conn:
             conn.execute(sql, ids)
             conn.commit()

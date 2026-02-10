@@ -52,6 +52,38 @@
       }
     }
   },
+  "Alias": {
+    "description": "称呼分析",
+    "type": "object",
+    "hint": "LLM 称呼抽取触发条件",
+    "items": {
+      "alias_analysis_batch_size": {
+        "description": "别称分析批量阈值",
+        "type": "int",
+        "hint": "待分析消息达到阈值触发 LLM 分析",
+        "default": 15
+      }
+    }
+  },
+  "Model": {
+    "description": "模型选择",
+    "type": "object",
+    "hint": "留空则使用会话当前模型",
+    "items": {
+      "update_provider_id": {
+        "description": "画像更新模型 Provider ID",
+        "type": "string",
+        "hint": "留空则使用会话当前模型",
+        "default": ""
+      },
+      "alias_provider_id": {
+        "description": "别称分析模型 Provider ID",
+        "type": "string",
+        "hint": "留空则使用会话当前模型",
+        "default": ""
+      }
+    }
+  },
   "Filters": {
     "description": "消息过滤",
     "type": "object",

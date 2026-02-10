@@ -11,6 +11,9 @@ class PluginConfig:
     enabled: bool
     update_msg_threshold: int
     update_time_threshold_sec: int
+    alias_analysis_batch_size: int
+    update_provider_id: str
+    alias_provider_id: str
     inject_max_chars: int
     inject_max_traits: int
     inject_max_facts: int
@@ -23,6 +26,8 @@ class PluginConfig:
         cfg = config or {}
         basic = cfg.get("Basic", {})
         update = cfg.get("Update", {})
+        alias = cfg.get("Alias", {})
+        model = cfg.get("Model", {})
         injection = cfg.get("Injection", {})
         filters = cfg.get("Filters", {})
         debug = cfg.get("Debug", {})
@@ -31,6 +36,9 @@ class PluginConfig:
             enabled=bool(basic.get("enabled", True)),
             update_msg_threshold=int(update.get("update_msg_threshold", 50)),
             update_time_threshold_sec=int(update.get("update_time_threshold_sec", 7200)),
+            alias_analysis_batch_size=int(alias.get("alias_analysis_batch_size", 15)),
+            update_provider_id=str(model.get("update_provider_id", "")).strip(),
+            alias_provider_id=str(model.get("alias_provider_id", "")).strip(),
             inject_max_chars=int(injection.get("inject_max_chars", 600)),
             inject_max_traits=int(injection.get("inject_max_traits", 8)),
             inject_max_facts=int(injection.get("inject_max_facts", 6)),
