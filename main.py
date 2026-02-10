@@ -101,31 +101,48 @@ class AutoImpressionCard(Star):
 
         user_id = str(event.get_sender_id())
         injections: list[str] = []
+        message_text = event.get_message_str() or ""
+        needs_tool = self._is_impression_query(message_text)
 
-        profile = await asyncio.to_thread(self.store.get_profile, group_id, user_id)
-        if profile and profile.summary:
-            injection = self._format_profile_for_injection(profile)
-            if injection:
-                injections.append(injection)
-                self._debug_log(
-                    f"[AIC] Injecting profile for user={user_id}, group={group_id}:\n{injection}"
-                )
+        if not needs_tool:
+            profile = await asyncio.to_thread(self.store.get_profile, group_id, user_id)
+            if profile and profile.summary:
+                injection = self._format_profile_for_injection(profile)
+                if injection:
+                    injections.append(injection)
+                    self._debug_log(
+                        f"[AIC] Injecting profile for user={user_id}, group={group_id}:\n{injection}"
+                    )
 
-        # If user mentions someone, inject that member's profile as well.
-        if isinstance(event, AiocqhttpMessageEvent):
-            target_id = self._extract_target_id_from_mentions(event)
-            if target_id and str(target_id) != user_id:
-                target_profile = await asyncio.to_thread(
-                    self.store.get_profile, group_id, str(target_id)
-                )
-                if target_profile and target_profile.summary:
-                    target_injection = self._format_profile_for_injection(target_profile)
-                    if target_injection:
-                        injections.append(target_injection)
-                        self._debug_log(
-                            "[AIC] Injecting mentioned profile "
-                            f"target={target_id}, group={group_id}:\n{target_injection}"
+            # If user mentions someone, inject that member's profile as well.
+            if isinstance(event, AiocqhttpMessageEvent):
+                target_id = self._extract_target_id_from_mentions(event)
+                if target_id and str(target_id) != user_id:
+                    target_profile = await asyncio.to_thread(
+                        self.store.get_profile, group_id, str(target_id)
+                    )
+                    if target_profile and target_profile.summary:
+                        target_injection = self._format_profile_for_injection(
+                            target_profile
                         )
+                        if target_injection:
+                            injections.append(target_injection)
+                            self._debug_log(
+                                "[AIC] Injecting mentioned profile "
+                                f"target={target_id}, group={group_id}:\n{target_injection}"
+                            )
+
+        tool_guidance = (
+            "[AIC Tool Guidance]\n"
+            "当用户询问某个群友的印象、回忆、评价、了解、关系、兴趣、偏好、"
+            "身份/角色等，或需要你基于档案回答时，必须先调用工具 "
+            "`get_impression_profile` 获取档案，再作答。\n"
+            "若用户提及具体对象，请使用对方的昵称/别名作为 `target` 参数。\n"
+            "本轮请先调用工具，不要先给出用户可见的回答。\n"
+            "除非用户明确要求（例如“对我/我自己”），否则不要对当前发起者调用该工具。\n"
+            "若只涉及被提及对象，仅调用一次工具即可。\n"
+            "如果工具返回 not_found/ambiguous，请向用户澄清后再答复，不要编造。"
+        )
 
         if injections:
             speaker_name = event.get_sender_name() or user_id
@@ -136,8 +153,14 @@ class AutoImpressionCard(Star):
                 "如提及他人，仅在不影响对当前发起者的回应前提下参考其印象。"
             )
             request.system_prompt = (
-                (request.system_prompt or "") + "\n\n" + guard + "\n\n" + "\n\n".join(injections)
+                (request.system_prompt or "")
+                + "\n\n"
+                + guard
+                + "\n\n"
+                + "\n\n".join(injections)
             )
+        if needs_tool:
+            request.system_prompt = (request.system_prompt or "") + "\n\n" + tool_guidance
 
     @llm_tool(name="get_impression_profile")
     async def get_impression_profile(
@@ -154,14 +177,15 @@ class AutoImpressionCard(Star):
 
         """
         if not self.config.enabled:
-            return "Error: plugin disabled."
+            return self._tool_result("error", "plugin disabled")
         if event.get_platform_name() != "aiocqhttp":
-            return "Error: only supported on aiocqhttp."
+            return self._tool_result("error", "only supported on aiocqhttp")
         group_id = str(event.get_group_id())
         if not group_id:
-            return "Error: group context required."
+            return self._tool_result("error", "group context required")
 
         speaker_id = str(event.get_sender_id())
+        message_text = event.get_message_str() or ""
         target = (target or "").strip()
         if target.startswith("@"):
             target = target[1:].strip()
@@ -175,27 +199,54 @@ class AutoImpressionCard(Star):
             candidates = await asyncio.to_thread(
                 self.store.find_alias_targets, group_id, speaker_id, target
             )
-            if not candidates:
-                return "No profile found for the given alias."
-            if len(candidates) > 1:
+            if len(candidates) == 1:
+                target_id = str(candidates[0]["target_id"])
+            elif len(candidates) > 1:
                 ids = ", ".join(c["target_id"] for c in candidates[:5])
-                return f"Ambiguous alias, candidates: {ids}"
-            target_id = str(candidates[0]["target_id"])
+                return self._tool_result("ambiguous", "alias matched multiple users", ids)
+            else:
+                # fallback: try nickname match
+                profiles = await asyncio.to_thread(
+                    self.store.find_profiles_by_nickname, group_id, target
+                )
+                if len(profiles) == 1:
+                    target_id = profiles[0].user_id
+                elif len(profiles) > 1:
+                    ids = ", ".join(p.user_id for p in profiles[:5])
+                    return self._tool_result(
+                        "ambiguous", "nickname matched multiple users", ids
+                    )
+                else:
+                    return self._tool_result("not_found", "no profile for alias")
+
+        if target_id == speaker_id and not self._is_self_profile_query(message_text):
+            return self._tool_result(
+                "not_allowed",
+                "current speaker not allowed unless explicitly requested",
+            )
 
         profile = await asyncio.to_thread(self.store.get_profile, group_id, target_id)
         if not profile or not profile.summary:
-            return "No profile found for this user."
+            return self._tool_result("not_found", "no profile for user")
 
         if detail.strip().lower() == "full":
             result = self._format_profile_for_reply(profile)
         else:
             result = self._format_profile_for_injection(profile)
 
+        payload = {
+            "status": "ok",
+            "detail": detail.strip().lower(),
+            "user_id": profile.user_id,
+            "nickname": profile.nickname or "",
+            "content": result,
+        }
+        text = json.dumps(payload, ensure_ascii=False)
         if self.config.debug_mode:
             logger.info(
-                f"[AIC] Tool get_impression_profile target={target_id}, detail={detail}:\n{result}"
+                f"[AIC] Tool get_impression_profile target={target_id}, detail={detail}:\n{text}"
             )
-        return result
+        return text
 
     @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP)
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE)
@@ -655,3 +706,53 @@ class AutoImpressionCard(Star):
     def _debug_log(self, message: str) -> None:
         if self.config.debug_mode:
             logger.info(message)
+
+    @staticmethod
+    def _is_impression_query(text: str) -> bool:
+        if not text:
+            return False
+        patterns = [
+            "印象",
+            "记得",
+            "回忆",
+            "回想",
+            "了解",
+            "认识",
+            "评价",
+            "看法",
+            "印记",
+            "档案",
+            "资料",
+            "卡片",
+            "人物",
+            "身份",
+            "角色",
+            "关系",
+            "背景",
+            "喜欢",
+            "爱吃",
+            "偏好",
+            "兴趣",
+            "性格",
+            "特征",
+            "是谁",
+            "什么样",
+        ]
+        return any(p in text for p in patterns)
+
+    @staticmethod
+    def _is_self_profile_query(text: str) -> bool:
+        if not text:
+            return False
+        patterns = [
+            r"(我|本人|自己).{0,6}(印象|记得|回忆|了解|评价|认识|是谁|什么样|资料|档案)",
+            r"(印象|记得|回忆|了解|评价|认识).{0,6}(我|本人|自己)",
+        ]
+        return any(re.search(p, text) for p in patterns)
+
+    @staticmethod
+    def _tool_result(status: str, message: str, extra: str | None = None) -> str:
+        payload = {"status": status, "message": message}
+        if extra:
+            payload["candidates"] = extra
+        return json.dumps(payload, ensure_ascii=False)
