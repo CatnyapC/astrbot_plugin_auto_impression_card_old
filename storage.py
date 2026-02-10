@@ -102,6 +102,7 @@ class ImpressionStore:
                 ON alias_map (group_id, speaker_id, alias)
                 """
             )
+            self._ensure_alias_map_columns(cur)
             conn.commit()
 
     def _connect(self) -> sqlite3.Connection:
@@ -111,6 +112,16 @@ class ImpressionStore:
         conn.execute("PRAGMA temp_store=MEMORY")
         conn.row_factory = sqlite3.Row
         return conn
+
+    @staticmethod
+    def _ensure_alias_map_columns(cur: sqlite3.Cursor) -> None:
+        cols = {row[1] for row in cur.execute("PRAGMA table_info(alias_map)")}
+        if "speaker_nickname" not in cols:
+            cur.execute("ALTER TABLE alias_map ADD COLUMN speaker_nickname TEXT")
+        if "target_nickname" not in cols:
+            cur.execute("ALTER TABLE alias_map ADD COLUMN target_nickname TEXT")
+        if "evidence_text" not in cols:
+            cur.execute("ALTER TABLE alias_map ADD COLUMN evidence_text TEXT")
 
     def touch_profile(self, group_id: str, user_id: str, nickname: str, ts: int) -> None:
         with self._connect() as conn:
@@ -403,6 +414,19 @@ class ImpressionStore:
                 ORDER BY confidence DESC, updated_at DESC
                 """,
                 (group_id, speaker_id, alias),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def find_alias_targets_global(self, group_id: str, alias: str) -> list[dict]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT target_id, confidence, updated_at
+                FROM alias_map
+                WHERE group_id=? AND alias=?
+                ORDER BY confidence DESC, updated_at DESC
+                """,
+                (group_id, alias),
             ).fetchall()
             return [dict(row) for row in rows]
 

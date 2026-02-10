@@ -206,7 +206,21 @@ class AutoImpressionCard(Star):
                 ids = ", ".join(c["target_id"] for c in candidates[:5])
                 return self._tool_result("ambiguous", "alias matched multiple users", ids)
             else:
-                # fallback: try nickname match
+                # fallback: try global alias then nickname match
+                candidates = await asyncio.to_thread(
+                    self.store.find_alias_targets_global, group_id, target
+                )
+                if len(candidates) == 1:
+                    target_id = str(candidates[0]["target_id"])
+                elif len(candidates) > 1:
+                    ids = ", ".join(c["target_id"] for c in candidates[:5])
+                    return self._tool_result(
+                        "ambiguous", "alias matched multiple users", ids
+                    )
+
+                if target_id:
+                    pass
+                else:
                 profiles = await asyncio.to_thread(
                     self.store.find_profiles_by_nickname, group_id, target
                 )

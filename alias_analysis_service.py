@@ -89,6 +89,7 @@ async def maybe_schedule_alias_analysis(
             for item in aliases[:MAX_ALIAS_RESULTS]:
                 speaker_id = item["speaker_id"]
                 target_id = item["target_id"]
+                evidence_text = item.get("evidence_text") or ""
                 await asyncio.to_thread(
                     store.upsert_alias,
                     group_id,
@@ -98,7 +99,7 @@ async def maybe_schedule_alias_analysis(
                     item["confidence"],
                     nickname_map.get(speaker_id),
                     nickname_map.get(target_id),
-                    None,
+                    evidence_text,
                     now,
                 )
                 pairs.add((speaker_id, target_id))
@@ -192,6 +193,7 @@ async def force_alias_analysis(
             for item in aliases[:MAX_ALIAS_RESULTS]:
                 speaker_id = item["speaker_id"]
                 target_id = item["target_id"]
+                evidence_text = item.get("evidence_text") or ""
                 await asyncio.to_thread(
                     store.upsert_alias,
                     group_id,
@@ -201,7 +203,7 @@ async def force_alias_analysis(
                     item["confidence"],
                     nickname_map.get(speaker_id),
                     nickname_map.get(target_id),
-                    None,
+                    evidence_text,
                     now,
                 )
                 pairs.add((speaker_id, target_id))
@@ -290,6 +292,7 @@ def parse_alias_json(text: str) -> tuple[list[dict], bool]:
         speaker_id = str(item.get("speaker_id", "")).strip()
         target_id = str(item.get("target_id", "")).strip()
         alias = str(item.get("alias", "")).strip()
+        evidence_text = str(item.get("evidence_text", "")).strip()
         if not speaker_id or not target_id or not alias:
             continue
         if not _is_clean_alias(alias):
@@ -301,6 +304,7 @@ def parse_alias_json(text: str) -> tuple[list[dict], bool]:
                 "target_id": target_id,
                 "alias": alias,
                 "confidence": confidence,
+                "evidence_text": evidence_text,
             }
         )
     return results, True

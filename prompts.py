@@ -76,4 +76,5 @@ ALIAS_ANALYSIS_SYSTEM_PROMPT = """
   - target_id: string
   - alias: string
   - confidence: number（0.5-0.95）
+  - evidence_text: string（原消息中能证明该称呼的片段，尽量短）
 """.strip()
