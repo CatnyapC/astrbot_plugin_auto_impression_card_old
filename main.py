@@ -6,7 +6,7 @@ import re
 import time
 from pathlib import Path
 
-from astrbot.api import AstrBotConfig, logger
+from astrbot.api import AstrBotConfig, llm_tool, logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star, register
 from astrbot.core.message.components import At, Plain, Reply
@@ -138,6 +138,64 @@ class AutoImpressionCard(Star):
             request.system_prompt = (
                 (request.system_prompt or "") + "\n\n" + guard + "\n\n" + "\n\n".join(injections)
             )
+
+    @llm_tool(name="get_impression_profile")
+    async def get_impression_profile(
+        self,
+        event: AstrMessageEvent,
+        target: str,
+        detail: str = "summary",
+    ) -> str:
+        """获取群友印象档案（本地数据库）。
+
+        Args:
+            target(string): 群友的 QQ 号或别名/昵称；为空则默认当前发起者。
+            detail(string): summary 或 full。summary 返回摘要，full 返回完整卡片。
+
+        """
+        if not self.config.enabled:
+            return "Error: plugin disabled."
+        if event.get_platform_name() != "aiocqhttp":
+            return "Error: only supported on aiocqhttp."
+        group_id = str(event.get_group_id())
+        if not group_id:
+            return "Error: group context required."
+
+        speaker_id = str(event.get_sender_id())
+        target = (target or "").strip()
+        if target.startswith("@"):
+            target = target[1:].strip()
+
+        target_id = ""
+        if not target:
+            target_id = speaker_id
+        elif target.isdigit():
+            target_id = target
+        else:
+            candidates = await asyncio.to_thread(
+                self.store.find_alias_targets, group_id, speaker_id, target
+            )
+            if not candidates:
+                return "No profile found for the given alias."
+            if len(candidates) > 1:
+                ids = ", ".join(c["target_id"] for c in candidates[:5])
+                return f"Ambiguous alias, candidates: {ids}"
+            target_id = str(candidates[0]["target_id"])
+
+        profile = await asyncio.to_thread(self.store.get_profile, group_id, target_id)
+        if not profile or not profile.summary:
+            return "No profile found for this user."
+
+        if detail.strip().lower() == "full":
+            result = self._format_profile_for_reply(profile)
+        else:
+            result = self._format_profile_for_injection(profile)
+
+        if self.config.debug_mode:
+            logger.info(
+                f"[AIC] Tool get_impression_profile target={target_id}, detail={detail}:\n{result}"
+            )
+        return result
 
     @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP)
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE)
