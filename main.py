@@ -100,15 +100,44 @@ class AutoImpressionCard(Star):
             return
 
         user_id = str(event.get_sender_id())
+        injections: list[str] = []
+
         profile = await asyncio.to_thread(self.store.get_profile, group_id, user_id)
-        if not profile or not profile.summary:
-            return
+        if profile and profile.summary:
+            injection = self._format_profile_for_injection(profile)
+            if injection:
+                injections.append(injection)
+                self._debug_log(
+                    f"[AIC] Injecting profile for user={user_id}, group={group_id}:\n{injection}"
+                )
 
-        injection = self._format_profile_for_injection(profile)
-        if not injection:
-            return
+        # If user mentions someone, inject that member's profile as well.
+        if isinstance(event, AiocqhttpMessageEvent):
+            target_id = self._extract_target_id_from_mentions(event)
+            if target_id and str(target_id) != user_id:
+                target_profile = await asyncio.to_thread(
+                    self.store.get_profile, group_id, str(target_id)
+                )
+                if target_profile and target_profile.summary:
+                    target_injection = self._format_profile_for_injection(target_profile)
+                    if target_injection:
+                        injections.append(target_injection)
+                        self._debug_log(
+                            "[AIC] Injecting mentioned profile "
+                            f"target={target_id}, group={group_id}:\n{target_injection}"
+                        )
 
-        request.system_prompt = (request.system_prompt or "") + "\n\n" + injection
+        if injections:
+            speaker_name = event.get_sender_name() or user_id
+            guard = (
+                "[AIC Notice]\n"
+                f"当前发起者是：{speaker_name}（{user_id}）。\n"
+                "必须优先回应当前发起者，群友印象仅供参考，不得覆盖当前发起者。\n"
+                "如提及他人，仅在不影响对当前发起者的回应前提下参考其印象。"
+            )
+            request.system_prompt = (
+                (request.system_prompt or "") + "\n\n" + guard + "\n\n" + "\n\n".join(injections)
+            )
 
     @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP)
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE)
@@ -257,6 +286,9 @@ class AutoImpressionCard(Star):
                     return
 
                 prompt = self._build_update_prompt(existing, pending)
+                self._debug_log(
+                    "[AIC] Update prompt:\n" + prompt
+                )
                 try:
                     resp = await provider.text_chat(
                         system_prompt=PROFILE_UPDATE_SYSTEM_PROMPT,
@@ -266,6 +298,10 @@ class AutoImpressionCard(Star):
                     logger.error(f"LLM update call failed: {exc}")
                     return
 
+                self._debug_log(
+                    "[AIC] Update raw response:\n"
+                    + (resp.completion_text or "")
+                )
                 data, ok = self._parse_profile_json(
                     resp.completion_text or "", existing
                 )
@@ -536,19 +572,12 @@ class AutoImpressionCard(Star):
         if len(summary) > self.config.inject_max_chars:
             summary = summary[: self.config.inject_max_chars].rstrip() + "..."
 
-        traits = profile.traits[: self.config.inject_max_traits]
-        facts = profile.facts[: self.config.inject_max_facts]
-
         parts = [
             "[Group Member Impression]",
             f"User ID: {profile.user_id}",
             f"Nickname: {profile.nickname or ''}",
             f"Summary: {summary}",
         ]
-        if traits:
-            parts.append("Traits: " + ", ".join(traits))
-        if facts:
-            parts.append("Facts: " + "; ".join(facts))
         return "\n".join(parts)
 
     def _format_profile_for_reply(self, profile: ProfileRecord) -> str:
@@ -564,3 +593,7 @@ class AutoImpressionCard(Star):
         if facts:
             lines.append("Facts: " + "; ".join(facts))
         return "\n".join(lines)
+
+    def _debug_log(self, message: str) -> None:
+        if self.config.debug_mode:
+            logger.info(message)

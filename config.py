@@ -16,6 +16,7 @@ class PluginConfig:
     inject_max_facts: int
     ignore_short_text_len: int
     ignore_regex: str
+    debug_mode: bool
 
     @classmethod
     def from_config(cls, config: AstrBotConfig | dict | None) -> "PluginConfig":
@@ -24,6 +25,7 @@ class PluginConfig:
         update = cfg.get("Update", {})
         injection = cfg.get("Injection", {})
         filters = cfg.get("Filters", {})
+        debug = cfg.get("Debug", {})
 
         return cls(
             enabled=bool(basic.get("enabled", True)),
@@ -34,4 +36,5 @@ class PluginConfig:
             inject_max_facts=int(injection.get("inject_max_facts", 6)),
             ignore_short_text_len=int(filters.get("ignore_short_text_len", 3)),
             ignore_regex=str(filters.get("ignore_regex", "")),
+            debug_mode=bool(debug.get("debug_mode", False)),
         )
