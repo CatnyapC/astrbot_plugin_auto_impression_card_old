@@ -1,0 +1,83 @@
+{
+  "Basic": {
+    "description": "基础设置",
+    "type": "object",
+    "hint": "插件开关与群白名单",
+    "items": {
+      "enabled": {
+        "description": "启用插件",
+        "type": "bool",
+        "default": true
+      },
+      "group_whitelist": {
+        "description": "群白名单",
+        "type": "list",
+        "items": {
+          "type": "string"
+        },
+        "hint": "仅在白名单群内启用（空列表表示全部关闭）",
+        "default": []
+      }
+    }
+  },
+  "Update": {
+    "description": "更新阈值",
+    "type": "object",
+    "hint": "控制画像更新触发条件",
+    "items": {
+      "update_msg_threshold": {
+        "description": "消息阈值",
+        "type": "int",
+        "hint": "新消息数达到阈值即触发更新",
+        "default": 50
+      },
+      "update_time_threshold_sec": {
+        "description": "时间阈值(秒)",
+        "type": "int",
+        "hint": "距离上次更新超过该时间即触发更新",
+        "default": 7200
+      }
+    }
+  },
+  "Injection": {
+    "description": "上下文注入",
+    "type": "object",
+    "hint": "控制注入长度与强度",
+    "items": {
+      "inject_max_chars": {
+        "description": "summary 最大字符数",
+        "type": "int",
+        "default": 600
+      },
+      "inject_max_traits": {
+        "description": "traits 最大数量",
+        "type": "int",
+        "default": 8
+      },
+      "inject_max_facts": {
+        "description": "facts 最大数量",
+        "type": "int",
+        "default": 6
+      }
+    }
+  },
+  "Filters": {
+    "description": "消息过滤",
+    "type": "object",
+    "hint": "控制采集范围",
+    "items": {
+      "ignore_short_text_len": {
+        "description": "忽略短文本阈值",
+        "type": "int",
+        "hint": "小于该长度的文本不采集",
+        "default": 3
+      },
+      "ignore_regex": {
+        "description": "忽略正则",
+        "type": "string",
+        "hint": "匹配则不采集",
+        "default": ""
+      }
+    }
+  }
+}
