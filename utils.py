@@ -53,6 +53,14 @@ def plain_from_raw_text(text: str) -> str:
     return cleaned.strip()
 
 
+def extract_target_ids_from_raw_text(text: str) -> set[str]:
+    if not text:
+        return set()
+    targets = set(re.findall(r"@(\d+)", text))
+    targets.update(re.findall(r"\[reply_to:(\d+)\]", text))
+    return {t for t in targets if t}
+
+
 def last_token(text: str) -> str:
     tokens = re.findall(r"[\w\u4e00-\u9fff]+", text)
     if not tokens:
@@ -134,3 +142,87 @@ def parse_profile_json(text: str, existing: dict) -> tuple[dict, bool]:
         },
         True,
     )
+
+
+def parse_group_profile_json(
+    text: str, existing_by_user: dict[str, dict]
+) -> tuple[dict[str, dict], bool]:
+    raw = extract_json(text)
+    if not raw:
+        return {}, False
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}, False
+
+    users = data.get("users") if isinstance(data, dict) else None
+    if users is None:
+        users = data
+
+    if isinstance(users, list):
+        items = []
+        for item in users:
+            if not isinstance(item, dict):
+                continue
+            user_id = str(item.get("user_id") or item.get("id") or "").strip()
+            if not user_id:
+                continue
+            items.append((user_id, item))
+    elif isinstance(users, dict):
+        items = [(str(k).strip(), v) for k, v in users.items()]
+    else:
+        return {}, False
+
+    results: dict[str, dict] = {}
+    for user_id, payload in items:
+        if not user_id or user_id not in existing_by_user:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        existing = existing_by_user[user_id]
+        summary = str(payload.get("summary", "")).strip() or existing.get("summary", "")
+        traits = payload.get("traits")
+        facts = payload.get("facts")
+        examples = payload.get("examples")
+        results[user_id] = {
+            "summary": summary,
+            "traits": safe_list(traits, existing.get("traits", [])),
+            "facts": safe_list(facts, existing.get("facts", [])),
+            "examples": safe_list(examples, existing.get("examples", [])),
+        }
+
+    if not results:
+        return {}, False
+    return results, True
+
+
+def parse_attribution_json(text: str, known_user_ids: set[str]) -> tuple[dict[int, list[str]], bool]:
+    raw = extract_json(text)
+    if not raw:
+        return {}, False
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}, False
+
+    assignments = data.get("assignments") if isinstance(data, dict) else None
+    if not isinstance(assignments, list):
+        return {}, False
+
+    results: dict[int, list[str]] = {}
+    for item in assignments:
+        if not isinstance(item, dict):
+            continue
+        message_id = item.get("message_id")
+        try:
+            message_id_int = int(message_id)
+        except (TypeError, ValueError):
+            continue
+        target_ids = item.get("target_ids")
+        if not isinstance(target_ids, list):
+            continue
+        filtered = [str(t).strip() for t in target_ids if str(t).strip() in known_user_ids]
+        if filtered:
+            results[message_id_int] = filtered
+
+    return results, True

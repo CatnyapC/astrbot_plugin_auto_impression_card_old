@@ -9,8 +9,15 @@ from astrbot.core.config.astrbot_config import AstrBotConfig
 @dataclass(slots=True)
 class PluginConfig:
     enabled: bool
+    update_mode: str
     update_msg_threshold: int
     update_time_threshold_sec: int
+    group_batch_known_users_max: int
+    group_batch_enable_nickname_match: bool
+    group_batch_enable_semantic_attribution: bool
+    group_batch_attribution_max_messages: int
+    group_batch_attribution_max_targets_per_message: int
+    group_batch_attribution_include_summary: bool
     alias_analysis_batch_size: int
     update_provider_id: str
     alias_provider_id: str
@@ -34,8 +41,28 @@ class PluginConfig:
 
         return cls(
             enabled=bool(basic.get("enabled", True)),
+            update_mode=str(update.get("update_mode", "group_batch")).strip()
+            or "group_batch",
             update_msg_threshold=int(update.get("update_msg_threshold", 50)),
             update_time_threshold_sec=int(update.get("update_time_threshold_sec", 7200)),
+            group_batch_known_users_max=int(
+                update.get("group_batch_known_users_max", 50)
+            ),
+            group_batch_enable_nickname_match=bool(
+                update.get("group_batch_enable_nickname_match", True)
+            ),
+            group_batch_enable_semantic_attribution=bool(
+                update.get("group_batch_enable_semantic_attribution", True)
+            ),
+            group_batch_attribution_max_messages=int(
+                update.get("group_batch_attribution_max_messages", 120)
+            ),
+            group_batch_attribution_max_targets_per_message=int(
+                update.get("group_batch_attribution_max_targets_per_message", 2)
+            ),
+            group_batch_attribution_include_summary=bool(
+                update.get("group_batch_attribution_include_summary", True)
+            ),
             alias_analysis_batch_size=int(alias.get("alias_analysis_batch_size", 15)),
             update_provider_id=str(model.get("update_provider_id", "")).strip(),
             alias_provider_id=str(model.get("alias_provider_id", "")).strip(),

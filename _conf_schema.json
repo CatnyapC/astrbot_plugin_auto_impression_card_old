@@ -16,6 +16,12 @@
     "type": "object",
     "hint": "控制画像更新触发条件",
     "items": {
+      "update_mode": {
+        "description": "更新模式",
+        "type": "string",
+        "hint": "per_user: 每人单独更新；group_batch: 群内批量；hybrid: 两者并行",
+        "default": "group_batch"
+      },
       "update_msg_threshold": {
         "description": "消息阈值",
         "type": "int",
@@ -27,6 +33,42 @@
         "type": "int",
         "hint": "距离上次更新超过该时间即触发更新",
         "default": 7200
+      },
+      "group_batch_known_users_max": {
+        "description": "候选用户数量",
+        "type": "int",
+        "hint": "群批量分析时纳入的候选用户数上限（按最近活跃排序）",
+        "default": 50
+      },
+      "group_batch_enable_nickname_match": {
+        "description": "昵称匹配",
+        "type": "bool",
+        "hint": "允许用昵称文本匹配推断被评价对象",
+        "default": true
+      },
+      "group_batch_enable_semantic_attribution": {
+        "description": "语义归属",
+        "type": "bool",
+        "hint": "使用 LLM 进行消息归属（无 @ / 昵称时也可推断）",
+        "default": true
+      },
+      "group_batch_attribution_max_messages": {
+        "description": "归属消息上限",
+        "type": "int",
+        "hint": "单次归属分析包含的最大消息数",
+        "default": 120
+      },
+      "group_batch_attribution_max_targets_per_message": {
+        "description": "归属目标上限",
+        "type": "int",
+        "hint": "每条消息最多归属到的用户数",
+        "default": 2
+      },
+      "group_batch_attribution_include_summary": {
+        "description": "归属带摘要",
+        "type": "bool",
+        "hint": "归属分析时提供用户摘要以便语义匹配",
+        "default": true
       }
     }
   },

@@ -222,6 +222,38 @@ class ImpressionStore:
                 version=row["version"] or 1,
             )
 
+    def get_recent_profiles_by_group(
+        self, group_id: str, limit: int | None = None
+    ) -> list[ProfileRecord]:
+        sql = """
+            SELECT * FROM profiles
+            WHERE group_id=?
+            ORDER BY last_seen DESC, updated_at DESC
+        """
+        params: tuple = (group_id,)
+        if limit is not None:
+            sql += " LIMIT ?"
+            params = (group_id, limit)
+        with self._connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
+            results = []
+            for row in rows:
+                results.append(
+                    ProfileRecord(
+                        group_id=row["group_id"],
+                        user_id=row["user_id"],
+                        nickname=row["nickname"],
+                        last_seen=row["last_seen"],
+                        summary=row["summary"],
+                        traits=self._load_list(row["traits"]),
+                        facts=self._load_list(row["facts"]),
+                        examples=self._load_list(row["examples"]),
+                        updated_at=row["updated_at"],
+                        version=row["version"] or 1,
+                    )
+                )
+            return results
+
     def find_profiles_by_nickname(
         self, group_id: str, nickname: str
     ) -> list[ProfileRecord]:

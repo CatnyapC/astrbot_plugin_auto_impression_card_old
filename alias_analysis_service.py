@@ -131,13 +131,13 @@ async def force_alias_analysis(
     lock = update_locks.setdefault(key, asyncio.Lock())
     async with lock:
         try:
-        pending = await asyncio.to_thread(
-            store.get_pending_messages_by_group,
-            group_id,
-            MAX_ALIAS_PENDING_MESSAGES,
-        )
-        if not pending:
-            return False
+            pending = await asyncio.to_thread(
+                store.get_pending_messages_by_group,
+                group_id,
+                MAX_ALIAS_PENDING_MESSAGES,
+            )
+            if not pending:
+                return False
 
             try:
                 provider_id = (

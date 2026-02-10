@@ -22,7 +22,12 @@ from .alias_service import extract_target_id_from_mentions, resolve_alias
 from .config import PluginConfig
 from .injection import apply_injection, format_profile_for_injection
 from .storage import ImpressionStore, ProfileRecord
-from .update_service import force_update, maybe_schedule_update
+from .update_service import (
+    force_group_update,
+    force_update,
+    maybe_schedule_group_update,
+    maybe_schedule_update,
+)
 from .utils import (
     extract_raw_text,
     extract_plain_text,
@@ -55,6 +60,8 @@ class AutoImpressionCard(Star):
         self._update_locks: dict[str, asyncio.Lock] = {}
         self._alias_active_updates: set[str] = set()
         self._alias_update_locks: dict[str, asyncio.Lock] = {}
+        self._group_active_updates: set[str] = set()
+        self._group_update_locks: dict[str, asyncio.Lock] = {}
 
     async def initialize(self):
         logger.info("Auto Impression Card plugin initialized")
@@ -111,20 +118,35 @@ class AutoImpressionCard(Star):
                 event.unified_msg_origin,
             )
         )
-        asyncio.create_task(
-            maybe_schedule_update(
-                self.context,
-                self.store,
-                self.config,
-                self._debug_log,
-                self._active_updates,
-                self._update_locks,
-                group_id,
-                user_id,
-                nickname,
-                event.unified_msg_origin,
+        update_mode = (self.config.update_mode or "group_batch").lower()
+        if update_mode in {"per_user", "hybrid"}:
+            asyncio.create_task(
+                maybe_schedule_update(
+                    self.context,
+                    self.store,
+                    self.config,
+                    self._debug_log,
+                    self._active_updates,
+                    self._update_locks,
+                    group_id,
+                    user_id,
+                    nickname,
+                    event.unified_msg_origin,
+                )
             )
-        )
+        if update_mode in {"group_batch", "hybrid"}:
+            asyncio.create_task(
+                maybe_schedule_group_update(
+                    self.context,
+                    self.store,
+                    self.config,
+                    self._debug_log,
+                    self._group_active_updates,
+                    self._group_update_locks,
+                    group_id,
+                    event.unified_msg_origin,
+                )
+            )
 
     @filter.on_llm_request()
     async def inject_profile(self, event: AstrMessageEvent, request):
@@ -297,19 +319,31 @@ class AutoImpressionCard(Star):
 
         nickname = event.get_sender_name() or target_id
 
+        update_mode = (self.config.update_mode or "group_batch").lower()
         yield event.plain_result("正在强制更新印象档案...")
-        ok = await force_update(
-            self.context,
-            self.store,
-            self.config,
-            self._debug_log,
-            self._update_locks,
-            event.unified_msg_origin,
-            group_id,
-            target_id,
-            nickname,
-            clear_old,
-        )
+        if update_mode in {"group_batch", "hybrid"}:
+            ok = await force_group_update(
+                self.context,
+                self.store,
+                self.config,
+                self._debug_log,
+                self._group_update_locks,
+                event.unified_msg_origin,
+                group_id,
+            )
+        else:
+            ok = await force_update(
+                self.context,
+                self.store,
+                self.config,
+                self._debug_log,
+                self._update_locks,
+                event.unified_msg_origin,
+                group_id,
+                target_id,
+                nickname,
+                clear_old,
+            )
         if ok:
             yield event.plain_result("印象档案已更新")
         else:
@@ -399,6 +433,7 @@ class AutoImpressionCard(Star):
             return match.group("name").strip()
         return ""
 
+    @staticmethod
     def _extract_alias_from_command(
         message_str: str, ignore_tokens: set[str] | None = None
     ) -> str:
