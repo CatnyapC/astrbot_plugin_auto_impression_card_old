@@ -16,6 +16,7 @@ from astrbot.core.utils.path_utils import get_astrbot_plugin_data_path
 
 from .alias_analysis_service import (
     build_alias_message_for_queue,
+    force_alias_analysis,
     maybe_schedule_alias_analysis,
 )
 from .alias_service import extract_target_id_from_mentions, resolve_alias
@@ -353,6 +354,33 @@ class AutoImpressionCard(Star):
             yield event.plain_result("印象档案已更新")
         else:
             yield event.plain_result("印象档案更新失败，请稍后重试")
+
+    @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP)
+    @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE)
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("称呼分析", alias={"/称呼分析", "别称分析", "/别称分析"})
+    async def alias_analysis_command(self, event: AiocqhttpMessageEvent):
+        event.should_call_llm(True)
+        if not self.config.enabled:
+            return
+        group_id = str(event.get_group_id())
+        if not group_id:
+            return
+
+        yield event.plain_result("正在分析称呼...")
+        ok = await force_alias_analysis(
+            self.context,
+            self.store,
+            self.config,
+            self._debug_log,
+            self._alias_update_locks,
+            group_id,
+            event.unified_msg_origin,
+        )
+        if ok:
+            yield event.plain_result("称呼分析已完成")
+        else:
+            yield event.plain_result("称呼分析失败或暂无待分析消息")
 
     @staticmethod
     def _extract_target_from_update_phrase(message_str: str) -> str:

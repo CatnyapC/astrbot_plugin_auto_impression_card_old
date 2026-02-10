@@ -138,6 +138,81 @@ async def maybe_schedule_alias_analysis(
             active_updates.discard(key)
 
 
+async def force_alias_analysis(
+    context,
+    store: ImpressionStore,
+    config,
+    debug_log,
+    update_locks: dict[str, asyncio.Lock],
+    group_id: str,
+    umo: str,
+) -> bool:
+    key = f"alias:{group_id}"
+    lock = update_locks.setdefault(key, asyncio.Lock())
+    async with lock:
+        try:
+            pending = await asyncio.to_thread(
+                store.get_alias_messages,
+                group_id,
+                MAX_ALIAS_PENDING_MESSAGES,
+            )
+            if not pending:
+                return False
+
+            try:
+                provider_id = (
+                    config.alias_provider_id
+                    or await context.get_current_chat_provider_id(umo=umo)
+                )
+            except ProviderNotFoundError as exc:
+                logger.warning(f"No LLM provider configured: {exc}")
+                return False
+
+            prompt = build_alias_prompt(pending)
+            debug_log("[AIC] Alias analysis prompt:\n" + prompt)
+            try:
+                resp = await context.llm_generate(
+                    chat_provider_id=provider_id,
+                    system_prompt=ALIAS_ANALYSIS_SYSTEM_PROMPT,
+                    prompt=prompt,
+                )
+            except ProviderNotFoundError as exc:
+                logger.warning(f"Provider not found for alias analysis: {exc}")
+                return False
+            except Exception as exc:  # noqa: BLE001
+                logger.error(f"LLM alias analysis call failed: {exc}")
+                return False
+
+            raw_text = resp.completion_text or ""
+            debug_log("[AIC] Alias analysis raw response:\n" + raw_text)
+            aliases, ok = parse_alias_json(raw_text)
+            if not ok:
+                logger.warning(
+                    "LLM alias analysis returned invalid JSON, keeping pending messages"
+                )
+                return False
+
+            now = int(time.time())
+            for item in aliases[:MAX_ALIAS_RESULTS]:
+                await asyncio.to_thread(
+                    store.upsert_alias,
+                    group_id,
+                    item["speaker_id"],
+                    item["alias"],
+                    item["target_id"],
+                    item["confidence"],
+                    now,
+                )
+
+            await asyncio.to_thread(
+                store.delete_alias_messages, [p.id for p in pending]
+            )
+            return True
+        except Exception as exc:  # noqa: BLE001
+            logger.error(f"Alias analysis failed: {exc}")
+            return False
+
+
 def build_alias_prompt(pending) -> str:
     lines = [
         "Messages:",
