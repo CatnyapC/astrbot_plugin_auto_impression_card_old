@@ -17,17 +17,14 @@ from astrbot.core.star.filter.command_group import CommandGroupFilter
 from astrbot.core.star.star_handler import EventType, star_handlers_registry
 from astrbot.core.utils.path_utils import get_astrbot_plugin_data_path
 
-from .alias_analysis_service import (
-    build_alias_message_for_queue,
-    force_alias_analysis,
-    maybe_schedule_alias_analysis,
-)
+from .alias_analysis_service import force_alias_analysis, maybe_schedule_alias_analysis
 from .alias_service import extract_target_id_from_mentions, resolve_alias
 from .config import PluginConfig
 from .injection import apply_injection, format_profile_for_injection
 from .storage import ImpressionStore, ProfileRecord
 from .update_service import force_update, maybe_schedule_update
 from .utils import (
+    extract_raw_text,
     extract_plain_text,
     is_self_profile_query,
 )
@@ -78,7 +75,8 @@ class AutoImpressionCard(Star):
         if str(event.get_sender_id()) == str(event.get_self_id()):
             return
 
-        plain_text = extract_plain_text(event.get_messages())
+        components = event.get_messages()
+        plain_text = extract_plain_text(components)
         if not plain_text:
             return
 
@@ -97,30 +95,22 @@ class AutoImpressionCard(Star):
         )
         if self._is_command_message(event, plain_text):
             return
+        raw_text = extract_raw_text(components) or plain_text
         await asyncio.to_thread(
-            self.store.enqueue_message, group_id, user_id, plain_text, ts
+            self.store.enqueue_message, group_id, user_id, raw_text, ts
         )
-        alias_message = build_alias_message_for_queue(event)
-        if alias_message:
-            await asyncio.to_thread(
-                self.store.enqueue_alias_message,
+        asyncio.create_task(
+            maybe_schedule_alias_analysis(
+                self.context,
+                self.store,
+                self.config,
+                self._debug_log,
+                self._alias_active_updates,
+                self._alias_update_locks,
                 group_id,
-                user_id,
-                alias_message,
-                ts,
+                event.unified_msg_origin,
             )
-            asyncio.create_task(
-                maybe_schedule_alias_analysis(
-                    self.context,
-                    self.store,
-                    self.config,
-                    self._debug_log,
-                    self._alias_active_updates,
-                    self._alias_update_locks,
-                    group_id,
-                    event.unified_msg_origin,
-                )
-            )
+        )
         asyncio.create_task(
             maybe_schedule_update(
                 self.context,

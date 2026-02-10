@@ -8,7 +8,7 @@ from astrbot.core.exceptions import ProviderNotFoundError
 
 from .prompts import PROFILE_UPDATE_SYSTEM_PROMPT
 from .storage import ImpressionStore, ProfileRecord
-from .utils import parse_profile_json
+from .utils import parse_profile_json, plain_from_raw_text
 
 MAX_PENDING_MESSAGES = 200
 
@@ -210,7 +210,8 @@ def build_update_prompt(existing: dict, pending) -> str:
     ]
     for idx, msg in enumerate(pending, 1):
         ts_text = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(msg.ts))
-        lines.append(f"{idx}. [{ts_text}] {msg.message}")
+        text = plain_from_raw_text(msg.message)
+        lines.append(f"{idx}. [{ts_text}] {text}")
     return "\n".join(lines)
 
 

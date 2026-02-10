@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import re
 
-from astrbot.core.message.components import Plain
+from astrbot.core.message.components import At, Plain, Reply
 
 
 def extract_plain_text(components) -> str:
@@ -13,6 +13,20 @@ def extract_plain_text(components) -> str:
             text = comp.text.strip()
             if text:
                 parts.append(text)
+    return " ".join(parts).strip()
+
+
+def extract_raw_text(components) -> str:
+    parts: list[str] = []
+    for comp in components:
+        if isinstance(comp, Plain):
+            text = comp.text.strip()
+            if text:
+                parts.append(text)
+        elif isinstance(comp, At):
+            parts.append(f"@{comp.qq}")
+        elif isinstance(comp, Reply) and comp.sender_id is not None:
+            parts.append(f"[reply_to:{comp.sender_id}]")
     return " ".join(parts).strip()
 
 
@@ -28,6 +42,15 @@ def extract_json(text: str) -> str:
     if start == -1 or end == -1 or end <= start:
         return ""
     return text[start : end + 1]
+
+
+def plain_from_raw_text(text: str) -> str:
+    if not text:
+        return ""
+    cleaned = re.sub(r"\[reply_to:\d+\]", " ", text)
+    cleaned = re.sub(r"@\d+", " ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    return cleaned.strip()
 
 
 def last_token(text: str) -> str:

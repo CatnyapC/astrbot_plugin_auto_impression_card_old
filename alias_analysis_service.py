@@ -7,11 +7,6 @@ import time
 
 from astrbot.api import logger
 from astrbot.core.exceptions import ProviderNotFoundError
-from astrbot.core.message.components import At, Plain, Reply
-from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
-    AiocqhttpMessageEvent,
-)
-
 from .prompts import ALIAS_ANALYSIS_SYSTEM_PROMPT
 from .storage import ImpressionStore
 from .update_service import force_update
@@ -21,42 +16,6 @@ MAX_ALIAS_PENDING_MESSAGES = 200
 MAX_ALIAS_RESULTS = 100
 MAX_ALIASES_PER_PAIR = 4
 ALIAS_RE = re.compile(r"^[\w\u4e00-\u9fff]{2,8}$")
-
-
-def build_alias_message_for_queue(event: AiocqhttpMessageEvent) -> str:
-    self_id = str(event.get_self_id())
-    parts: list[str] = []
-    has_non_self_target = False
-    reply_to_self = False
-
-    for comp in event.get_messages():
-        if isinstance(comp, Plain):
-            text = comp.text.strip()
-            if text:
-                parts.append(text)
-        elif isinstance(comp, At):
-            parts.append(f"@{comp.qq}")
-            if str(comp.qq) != self_id:
-                has_non_self_target = True
-        elif isinstance(comp, Reply):
-            if comp.sender_id is None:
-                continue
-            parts.append(f"[reply_to:{comp.sender_id}]")
-            if str(comp.sender_id) == self_id:
-                reply_to_self = True
-            else:
-                has_non_self_target = True
-
-    message = " ".join(parts).strip()
-    if not message:
-        return ""
-    if reply_to_self:
-        return ""
-    if message.startswith("/") or message.startswith("／"):
-        return ""
-    if not has_non_self_target and len(message) < 4:
-        return ""
-    return message
 
 
 async def maybe_schedule_alias_analysis(
@@ -77,7 +36,7 @@ async def maybe_schedule_alias_analysis(
     async with lock:
         try:
             pending = await asyncio.to_thread(
-                store.get_alias_messages,
+                store.get_pending_messages_by_group,
                 group_id,
                 MAX_ALIAS_PENDING_MESSAGES,
             )
@@ -143,9 +102,6 @@ async def maybe_schedule_alias_analysis(
                     MAX_ALIASES_PER_PAIR,
                 )
 
-            await asyncio.to_thread(
-                store.delete_alias_messages, [p.id for p in pending]
-            )
             await _force_updates_for_alias_targets(
                 context,
                 store,
@@ -175,13 +131,13 @@ async def force_alias_analysis(
     lock = update_locks.setdefault(key, asyncio.Lock())
     async with lock:
         try:
-            pending = await asyncio.to_thread(
-                store.get_alias_messages,
-                group_id,
-                MAX_ALIAS_PENDING_MESSAGES,
-            )
-            if not pending:
-                return False
+        pending = await asyncio.to_thread(
+            store.get_pending_messages_by_group,
+            group_id,
+            MAX_ALIAS_PENDING_MESSAGES,
+        )
+        if not pending:
+            return False
 
             try:
                 provider_id = (
@@ -240,9 +196,6 @@ async def force_alias_analysis(
                     MAX_ALIASES_PER_PAIR,
                 )
 
-            await asyncio.to_thread(
-                store.delete_alias_messages, [p.id for p in pending]
-            )
             await _force_updates_for_alias_targets(
                 context,
                 store,
@@ -297,9 +250,7 @@ def build_alias_prompt(pending) -> str:
     ]
     for idx, msg in enumerate(pending, 1):
         ts_text = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(msg.ts))
-        lines.append(
-            f"{idx}. [{ts_text}] speaker={msg.speaker_id} text={msg.message}"
-        )
+        lines.append(f"{idx}. [{ts_text}] speaker={msg.user_id} text={msg.message}")
     return "\n".join(lines)
 
 
