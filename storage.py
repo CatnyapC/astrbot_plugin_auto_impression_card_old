@@ -111,11 +111,13 @@ class ImpressionStore:
                     item_type TEXT NOT NULL,
                     item_text TEXT NOT NULL,
                     message_id INTEGER NOT NULL,
+                    speaker_id TEXT NOT NULL,
                     message_text TEXT NOT NULL,
                     message_ts INTEGER NOT NULL,
                     evidence_confidence REAL,
                     joke_likelihood REAL,
                     source_type TEXT,
+                    consistency_tag TEXT,
                     created_at INTEGER NOT NULL
                 )
                 """
@@ -139,6 +141,7 @@ class ImpressionStore:
             )
             self._ensure_alias_map_columns(cur)
             self._ensure_profile_columns(cur)
+            self._ensure_evidence_columns(cur)
             conn.commit()
 
     def _connect(self) -> sqlite3.Connection:
@@ -168,6 +171,20 @@ class ImpressionStore:
             cur.execute("ALTER TABLE profiles ADD COLUMN traits_confidence TEXT")
         if "facts_confidence" not in cols:
             cur.execute("ALTER TABLE profiles ADD COLUMN facts_confidence TEXT")
+
+    @staticmethod
+    def _ensure_evidence_columns(cur: sqlite3.Cursor) -> None:
+        cols = {row[1] for row in cur.execute("PRAGMA table_info(impression_evidence)")}
+        if "speaker_id" not in cols:
+            cur.execute("ALTER TABLE impression_evidence ADD COLUMN speaker_id TEXT")
+        if "evidence_confidence" not in cols:
+            cur.execute("ALTER TABLE impression_evidence ADD COLUMN evidence_confidence REAL")
+        if "joke_likelihood" not in cols:
+            cur.execute("ALTER TABLE impression_evidence ADD COLUMN joke_likelihood REAL")
+        if "source_type" not in cols:
+            cur.execute("ALTER TABLE impression_evidence ADD COLUMN source_type TEXT")
+        if "consistency_tag" not in cols:
+            cur.execute("ALTER TABLE impression_evidence ADD COLUMN consistency_tag TEXT")
 
     def touch_profile(self, group_id: str, user_id: str, nickname: str, ts: int) -> None:
         with self._connect() as conn:
@@ -433,18 +450,36 @@ class ImpressionStore:
                     item_type,
                     item_text,
                     message_id,
+                    speaker_id,
                     message_text,
                     message_ts,
                     evidence_confidence,
                     joke_likelihood,
                     source_type,
+                    consistency_tag,
                     created_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 records,
             )
             conn.commit()
+
+    def get_evidence_for_item(
+        self, group_id: str, user_id: str, item_type: str, item_text: str
+    ) -> list[dict]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT message_id, speaker_id, message_ts, evidence_confidence,
+                       joke_likelihood, source_type, consistency_tag
+                FROM impression_evidence
+                WHERE group_id=? AND user_id=? AND item_type=? AND item_text=?
+                ORDER BY message_ts DESC, id DESC
+                """,
+                (group_id, user_id, item_type, item_text),
+            ).fetchall()
+            return [dict(row) for row in rows]
 
     def get_user_trust(self, group_id: str, user_id: str) -> float:
         with self._connect() as conn:

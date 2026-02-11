@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import time
 
 from astrbot.api import logger
@@ -144,6 +145,7 @@ async def maybe_schedule_group_update(
                     recent_profiles,
                     config.group_batch_attribution_include_summary,
                 )
+                start_ts = time.time()
                 debug_log("[AIC] Group attribution prompt:\n" + attribution_prompt)
                 provider_id = await _get_provider_id(context, config, umo)
                 if provider_id:
@@ -154,6 +156,9 @@ async def maybe_schedule_group_update(
                             prompt=attribution_prompt,
                         )
                         raw_text = resp.completion_text or ""
+                        debug_log(
+                            f"[AIC] Group attribution duration: {time.time() - start_ts:.2f}s"
+                        )
                         debug_log("[AIC] Group attribution raw response:\n" + raw_text)
                         attribution_map, _ = parse_attribution_json(
                             raw_text, {p.user_id for p in recent_profiles}
@@ -310,6 +315,7 @@ async def force_group_update(
                 recent_profiles,
                 config.group_batch_attribution_include_summary,
             )
+            start_ts = time.time()
             debug_log("[AIC] Group attribution prompt:\n" + attribution_prompt)
             provider_id = await _get_provider_id(context, config, umo)
             if provider_id:
@@ -320,6 +326,9 @@ async def force_group_update(
                         prompt=attribution_prompt,
                     )
                     raw_text = resp.completion_text or ""
+                    debug_log(
+                        f"[AIC] Group attribution duration: {time.time() - start_ts:.2f}s"
+                    )
                     debug_log("[AIC] Group attribution raw response:\n" + raw_text)
                     attribution_map, _ = parse_attribution_json(
                         raw_text, {p.user_id for p in recent_profiles}
@@ -508,6 +517,7 @@ async def _run_phase_updates(
     }
 
     phase1_prompt = build_phase1_prompt(pending_by_user, known_user_ids, nickname_by_user)
+    phase1_start = time.time()
     debug_log("[AIC] Phase1 prompt:\n" + phase1_prompt)
     try:
         resp = await context.llm_generate(
@@ -519,6 +529,7 @@ async def _run_phase_updates(
         logger.error(f"LLM phase1 call failed: {exc}")
         return False
     raw_text = resp.completion_text or ""
+    debug_log(f"[AIC] Phase1 duration: {time.time() - phase1_start:.2f}s")
     debug_log("[AIC] Phase1 raw response:\n" + raw_text)
     phase1_data, ok = parse_phase1_candidates(raw_text, known_user_ids)
     if not ok:
@@ -554,6 +565,7 @@ async def _run_phase_updates(
                 for uid in users_for_merge
             },
         )
+        phase2_start = time.time()
         debug_log("[AIC] Phase2 prompt:\n" + phase2_prompt)
         try:
             resp = await context.llm_generate(
@@ -565,6 +577,7 @@ async def _run_phase_updates(
             logger.error(f"LLM phase2 call failed: {exc}")
             return False
         raw_text = resp.completion_text or ""
+        debug_log(f"[AIC] Phase2 duration: {time.time() - phase2_start:.2f}s")
         debug_log("[AIC] Phase2 raw response:\n" + raw_text)
         phase2_data, ok = parse_phase2_merge(raw_text, users_for_merge)
         if not ok:
@@ -595,6 +608,7 @@ async def _run_phase_updates(
         }
 
     summary_prompt = build_phase3_prompt(final_by_user, profiles_by_user)
+    phase3_start = time.time()
     debug_log("[AIC] Phase3 prompt:\n" + summary_prompt)
     try:
         resp = await context.llm_generate(
@@ -606,6 +620,7 @@ async def _run_phase_updates(
         logger.error(f"LLM phase3 call failed: {exc}")
         return False
     raw_text = resp.completion_text or ""
+    debug_log(f"[AIC] Phase3 duration: {time.time() - phase3_start:.2f}s")
     debug_log("[AIC] Phase3 raw response:\n" + raw_text)
     summaries, ok = parse_phase3_summaries(raw_text, known_user_ids)
     if not ok:
@@ -626,7 +641,7 @@ async def _run_phase_updates(
         summary = summaries.get(user_id) or (profile.summary if profile else "") or ""
         final_traits = final_by_user[user_id]["traits"]
         final_facts = final_by_user[user_id]["facts"]
-        evidence_records, trait_conf_map, fact_conf_map = build_evidence_records(
+        evidence_records = build_evidence_records(
             group_id,
             user_id,
             final_traits,
@@ -636,11 +651,16 @@ async def _run_phase_updates(
             candidate_by_user.get(user_id, {}),
             pending_by_id,
             now,
-            trust_scores,
         )
         if evidence_records:
             await asyncio.to_thread(store.insert_evidence, evidence_records)
             _prune_evidence(store, group_id, user_id, final_traits, final_facts)
+        trait_conf_map = _recompute_confidence_map(
+            store, group_id, user_id, "trait", final_traits, trust_scores, config
+        )
+        fact_conf_map = _recompute_confidence_map(
+            store, group_id, user_id, "fact", final_facts, trust_scores, config
+        )
 
         record = ProfileRecord(
             group_id=group_id,
@@ -763,11 +783,8 @@ def build_evidence_records(
     candidates: dict,
     pending_by_id: dict[int, object],
     created_at: int,
-    trust_scores: dict[str, float],
-) -> tuple[list[tuple], dict[str, float], dict[str, float]]:
+) -> list[tuple]:
     records: list[tuple] = []
-    trait_conf: dict[str, float] = {}
-    fact_conf: dict[str, float] = {}
 
     for item_type, final_items in ("trait", final_traits), ("fact", final_facts):
         mapping_block = mapping.get(f"{item_type}s", {}) if isinstance(mapping, dict) else {}
@@ -786,7 +803,6 @@ def build_evidence_records(
             if not candidate_texts:
                 candidate_texts = [item_text]
 
-            signals: list[dict] = []
             evidence_msgs = []
             for candidate_text in candidate_texts:
                 items = candidate_items.get(candidate_text, [])
@@ -800,38 +816,17 @@ def build_evidence_records(
                     evidence_conf = float(item.get("evidence_confidence", 0.6))
                     joke_lik = float(item.get("joke_likelihood", 0.2))
                     source_type = item.get("source_type", "other")
-                    speaker_id = str(msg.user_id)
-                    trust = trust_scores.get(speaker_id, 0.7)
-                    source_weight = 1.0 if source_type == "self" else 0.7
                     consistency_tag = (
-                        consistency_block.get(item_text) if isinstance(consistency_block, dict) else None
+                        consistency_block.get(item_text)
+                        if isinstance(consistency_block, dict)
+                        else None
                     )
-                    consistency_weight = 1.0
-                    if consistency_tag == "conflicting":
-                        consistency_weight = 0.4
-                    elif consistency_tag == "neutral":
-                        consistency_weight = 0.7
-                    signal = _clamp(
-                        evidence_conf * (1 - joke_lik) * source_weight * trust * consistency_weight
-                    )
-                    signals.append({"signal": signal, "msg": msg, "item": item})
-                    evidence_msgs.append((signal, msg, item))
+                    evidence_msgs.append((msg, item, evidence_conf, joke_lik, source_type, consistency_tag))
 
-            if not signals:
-                final_conf = 0.0
-            else:
-                prod = 1.0
-                for s in signals:
-                    prod *= 1 - _clamp(s["signal"])
-                final_conf = _clamp(1 - prod)
-
-            if item_type == "trait":
-                trait_conf[item_text] = final_conf
-            else:
-                fact_conf[item_text] = final_conf
-
-            evidence_msgs.sort(key=lambda x: (x[0], x[1].ts, x[1].id), reverse=True)
-            for signal, msg, item in evidence_msgs[:MAX_EVIDENCE_PER_ITEM]:
+            evidence_msgs.sort(key=lambda x: (x[0].ts, x[0].id), reverse=True)
+            for msg, item, evidence_conf, joke_lik, source_type, consistency_tag in evidence_msgs[
+                :MAX_EVIDENCE_PER_ITEM
+            ]:
                 records.append(
                     (
                         group_id,
@@ -839,15 +834,63 @@ def build_evidence_records(
                         item_type,
                         item_text,
                         msg.id,
+                        str(msg.user_id),
                         msg.message,
                         msg.ts,
-                        float(item.get("evidence_confidence", 0.6)),
-                        float(item.get("joke_likelihood", 0.2)),
-                        item.get("source_type", "other"),
+                        evidence_conf,
+                        joke_lik,
+                        source_type,
+                        consistency_tag,
                         created_at,
                     )
                 )
-    return records, trait_conf, fact_conf
+    return records
+
+
+def _recompute_confidence_map(
+    store: ImpressionStore,
+    group_id: str,
+    user_id: str,
+    item_type: str,
+    items: list[str],
+    trust_scores: dict[str, float],
+    config,
+) -> dict[str, float]:
+    result: dict[str, float] = {}
+    half_life_days = max(0.0, float(config.evidence_half_life_days))
+    half_life_sec = half_life_days * 86400.0
+    now = time.time()
+    for item_text in items:
+        evidence_rows = store.get_evidence_for_item(group_id, user_id, item_type, item_text)
+        if not evidence_rows:
+            result[item_text] = 0.0
+            continue
+        prod = 1.0
+        for row in evidence_rows:
+            evidence_conf = float(row.get("evidence_confidence") or 0.6)
+            joke_lik = float(row.get("joke_likelihood") or 0.2)
+            source_type = row.get("source_type") or "other"
+            source_weight = 1.0 if source_type == "self" else 0.7
+            speaker_id = str(row.get("speaker_id") or "")
+            trust = trust_scores.get(speaker_id)
+            if trust is None:
+                trust = store.get_user_trust(group_id, speaker_id) if speaker_id else 0.7
+            consistency_tag = row.get("consistency_tag")
+            consistency_weight = 1.0
+            if consistency_tag == "conflicting":
+                consistency_weight = 0.4
+            elif consistency_tag == "neutral":
+                consistency_weight = 0.7
+            signal = evidence_conf * (1 - joke_lik) * source_weight * trust * consistency_weight
+            if half_life_sec > 0:
+                delta = max(0.0, now - float(row.get("message_ts") or now))
+                decay = math.exp(-delta / half_life_sec)
+            else:
+                decay = 1.0
+            signal = _clamp(signal * decay)
+            prod *= 1 - signal
+        result[item_text] = _clamp(1 - prod)
+    return result
 
 
 def build_group_attribution_prompt(

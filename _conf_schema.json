@@ -81,6 +81,12 @@
         "type": "bool",
         "hint": "归属分析时提供用户摘要以便语义匹配",
         "default": true
+      },
+      "evidence_half_life_days": {
+        "description": "证据半衰期(天)",
+        "type": "float",
+        "hint": "证据贡献随时间衰减的半衰期",
+        "default": 30.0
       }
     }
   },

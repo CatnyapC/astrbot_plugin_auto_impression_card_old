@@ -55,6 +55,7 @@ async def maybe_schedule_alias_analysis(
                 return
 
             prompt = build_alias_prompt(pending)
+            start_ts = time.time()
             debug_log("[AIC] Alias analysis prompt:\n" + prompt)
             try:
                 resp = await context.llm_generate(
@@ -70,6 +71,7 @@ async def maybe_schedule_alias_analysis(
                 return
 
             raw_text = resp.completion_text or ""
+            debug_log(f"[AIC] Alias analysis duration: {time.time() - start_ts:.2f}s")
             debug_log("[AIC] Alias analysis raw response:\n" + raw_text)
             aliases, ok = parse_alias_json(raw_text)
             if not ok:
@@ -159,6 +161,7 @@ async def force_alias_analysis(
                 return False
 
             prompt = build_alias_prompt(pending)
+            start_ts = time.time()
             debug_log("[AIC] Alias analysis prompt:\n" + prompt)
             try:
                 resp = await context.llm_generate(
@@ -174,6 +177,7 @@ async def force_alias_analysis(
                 return False
 
             raw_text = resp.completion_text or ""
+            debug_log(f"[AIC] Alias analysis duration: {time.time() - start_ts:.2f}s")
             debug_log("[AIC] Alias analysis raw response:\n" + raw_text)
             aliases, ok = parse_alias_json(raw_text)
             if not ok:
