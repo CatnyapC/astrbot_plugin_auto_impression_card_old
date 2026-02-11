@@ -51,6 +51,22 @@ async def maybe_schedule_group_update(
             )
             if not pending:
                 return
+            group_last_update = await asyncio.to_thread(
+                store.get_group_last_update, group_id
+            )
+            now = int(time.time())
+            if len(pending) < config.update_msg_threshold:
+                if group_last_update == 0:
+                    return
+                if now - group_last_update < config.update_time_threshold_sec:
+                    return
+            debug_log(
+                "[AIC] Group update trigger: "
+                f"group={group_id} pending={len(pending)} "
+                f"threshold={config.update_msg_threshold} "
+                f"group_last_update={group_last_update} "
+                f"time_threshold={config.update_time_threshold_sec}"
+            )
 
             recent_profiles = await asyncio.to_thread(
                 store.get_recent_profiles_by_group,

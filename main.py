@@ -190,9 +190,64 @@ class AutoImpressionCard(Star):
                             "ambiguous", "nickname matched multiple users", ids
                         )
                     else:
-                        return self._tool_result(
-                            "not_found", "no profile for alias"
-                        )
+                        pass
+
+        if not target_id and message_text:
+            alias_index = await asyncio.to_thread(self.store.get_alias_index, group_id)
+            token_candidates = [
+                t for t in re.findall(r"[\w\u4e00-\u9fff]{2,16}", message_text)
+            ]
+
+            def _norm_alias(text: str) -> str:
+                return re.sub(r"[，。！？,!.?;；:：]+$", "", text.strip()).lower()
+
+            speaker_lookup: dict[str, str] = {}
+            for alias in alias_index.get(speaker_id, {}).keys():
+                norm = _norm_alias(alias)
+                if norm and norm not in speaker_lookup:
+                    speaker_lookup[norm] = alias
+
+            global_lookup: dict[str, str] = {}
+            for aliases in alias_index.values():
+                for alias in aliases.keys():
+                    norm = _norm_alias(alias)
+                    if norm and norm not in global_lookup:
+                        global_lookup[norm] = alias
+
+            for token in token_candidates:
+                norm = _norm_alias(token)
+                if not norm:
+                    continue
+                matched_alias = speaker_lookup.get(norm)
+                if not matched_alias and norm in global_lookup:
+                    matched_alias = global_lookup[norm]
+                if not matched_alias:
+                    continue
+                candidates = await asyncio.to_thread(
+                    self.store.find_alias_targets, group_id, speaker_id, matched_alias
+                )
+                if len(candidates) == 1:
+                    target_id = str(candidates[0]["target_id"])
+                    break
+                if len(candidates) > 1:
+                    ids = ", ".join(c["target_id"] for c in candidates[:5])
+                    return self._tool_result(
+                        "ambiguous", "alias matched multiple users", ids
+                    )
+                candidates = await asyncio.to_thread(
+                    self.store.find_alias_targets_global, group_id, matched_alias
+                )
+                if len(candidates) == 1:
+                    target_id = str(candidates[0]["target_id"])
+                    break
+                if len(candidates) > 1:
+                    ids = ", ".join(c["target_id"] for c in candidates[:5])
+                    return self._tool_result(
+                        "ambiguous", "alias matched multiple users", ids
+                    )
+
+        if not target_id:
+            return self._tool_result("not_found", "no profile for alias")
 
         if target_id == speaker_id and not is_self_profile_query(message_text):
             return self._tool_result(
@@ -202,10 +257,14 @@ class AutoImpressionCard(Star):
 
         profile = await asyncio.to_thread(self.store.get_profile, group_id, target_id)
         if not profile or not profile.summary:
+            profile = await asyncio.to_thread(
+                self.store.get_profile_any_group, target_id
+            )
+        if not profile or not profile.summary:
             return self._tool_result("not_found", "no profile for user")
 
         alias_rows = await asyncio.to_thread(
-            self.store.get_aliases_by_target, group_id, target_id
+            self.store.get_aliases_by_target, profile.group_id, target_id
         )
         aliases_by_speaker: dict[str, list[str]] = {}
         for row in alias_rows:
@@ -236,6 +295,65 @@ class AutoImpressionCard(Star):
                 f"[AIC] Tool get_impression_profile target={target_id}, detail={detail}:\n{text}"
             )
         return text
+
+    @llm_tool(name="resolve_alias")
+    async def resolve_alias_tool(
+        self,
+        event: AstrMessageEvent,
+        alias: str,
+    ) -> str:
+        """解析别称/昵称到 user_id（alias_map 优先，fallback 全局别称）。
+
+        Args:
+            alias(string): 别称或昵称（不含 @）。
+
+        """
+        if not self.config.enabled:
+            return self._tool_result("error", "plugin disabled")
+        if event.get_platform_name() != "aiocqhttp":
+            return self._tool_result("error", "only supported on aiocqhttp")
+        group_id = str(event.get_group_id())
+        if not group_id:
+            return self._tool_result("error", "group context required")
+
+        speaker_id = str(event.get_sender_id())
+        alias = (alias or "").strip()
+        if alias.startswith("@"):
+            alias = alias[1:].strip()
+        if not alias:
+            return self._tool_result("not_found", "empty alias")
+
+        candidates = await asyncio.to_thread(
+            self.store.find_alias_targets, group_id, speaker_id, alias
+        )
+        if len(candidates) == 1:
+            target_id = str(candidates[0]["target_id"])
+            return self._tool_result("ok", target_id, target_id)
+        if len(candidates) > 1:
+            ids = ", ".join(c["target_id"] for c in candidates[:5])
+            return self._tool_result("ambiguous", "alias matched multiple users", ids)
+
+        candidates = await asyncio.to_thread(
+            self.store.find_alias_targets_global, group_id, alias
+        )
+        if len(candidates) == 1:
+            target_id = str(candidates[0]["target_id"])
+            return self._tool_result("ok", target_id, target_id)
+        if len(candidates) > 1:
+            ids = ", ".join(c["target_id"] for c in candidates[:5])
+            return self._tool_result("ambiguous", "alias matched multiple users", ids)
+
+        profiles = await asyncio.to_thread(
+            self.store.find_profiles_by_nickname, group_id, alias
+        )
+        if len(profiles) == 1:
+            target_id = profiles[0].user_id
+            return self._tool_result("ok", target_id, target_id)
+        if len(profiles) > 1:
+            ids = ", ".join(p.user_id for p in profiles[:5])
+            return self._tool_result("ambiguous", "nickname matched multiple users", ids)
+
+        return self._tool_result("not_found", "no alias match")
 
     @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP)
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE)

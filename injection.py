@@ -17,12 +17,12 @@ def build_tool_guidance() -> str:
     return (
         "[AIC Tool Guidance]\n"
         "当用户询问某个群友的印象、回忆、评价、了解、关系、兴趣、偏好、"
-        "身份/角色等，或需要你基于档案回答时，必须先调用工具 "
-        "`get_impression_profile` 获取档案，再作答。\n"
-        "若用户提及具体对象，请使用对方的昵称/别名作为 `target` 参数。\n"
+        "身份/角色等，或需要你基于档案回答时，必须先调用工具。\n"
+        "若用户提及具体对象但未 @，请先调用 `resolve_alias` 把别称解析成 user_id。\n"
+        "解析成功后再用 `get_impression_profile` 获取档案，再作答。\n"
+        "若用户提及具体对象并且明确 @ 了对方，可直接用 `get_impression_profile`。\n"
         "本轮请先调用工具，不要先给出用户可见的回答。\n"
         "除非用户明确要求（例如“对我/我自己”），否则不要对当前发起者调用该工具。\n"
-        "若只涉及被提及对象，仅调用一次工具即可。\n"
         "如果工具返回 not_found/ambiguous，请向用户澄清后再答复，不要编造。"
     )
 
@@ -66,7 +66,7 @@ async def apply_injection(
 
     user_id = str(event.get_sender_id())
     message_text = event.get_message_str() or ""
-    needs_tool = is_impression_query(message_text)
+    needs_tool = True if config.force_tool_guidance else is_impression_query(message_text)
     injections: list[str] = []
 
     if not needs_tool:

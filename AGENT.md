@@ -55,6 +55,13 @@
 - Alias confidence uses the same trust/decay formula and is computed from alias evidence.
 - Evidence half-life: `Update.evidence_half_life_days`
 - Global force update: `/印象更新` with `全体/全部/all/a` updates all known groups.
+- Impression lookup (tool):
+  - `get_impression_profile` resolves alias in this order:
+    - speaker-specific alias_map
+    - global alias_map (cross-group)
+    - nickname
+  - If no profile in current group, it falls back to the most recently updated
+    profile for the same user_id across all groups.
 - Evidence storage:
   - `profiles.examples` is not used.
   - Evidence is stored in `impression_evidence` keyed by trait/fact.

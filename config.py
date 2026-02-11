@@ -33,6 +33,7 @@ class PluginConfig:
     inject_max_facts: int
     ignore_short_text_len: int
     ignore_regex: str
+    force_tool_guidance: bool
     debug_mode: bool
 
     @classmethod
@@ -44,6 +45,7 @@ class PluginConfig:
         model = cfg.get("Model", {})
         injection = cfg.get("Injection", {})
         filters = cfg.get("Filters", {})
+        tool = cfg.get("Tool", {})
         debug = cfg.get("Debug", {})
 
         return cls(
@@ -84,5 +86,6 @@ class PluginConfig:
             inject_max_facts=int(injection.get("inject_max_facts", 6)),
             ignore_short_text_len=int(filters.get("ignore_short_text_len", 3)),
             ignore_regex=str(filters.get("ignore_regex", "")),
+            force_tool_guidance=bool(tool.get("force_tool_guidance", False)),
             debug_mode=bool(debug.get("debug_mode", False)),
         )

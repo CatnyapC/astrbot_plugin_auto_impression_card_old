@@ -199,5 +199,18 @@
         "default": false
       }
     }
+  },
+  "Tool": {
+    "description": "工具触发",
+    "type": "object",
+    "hint": "控制是否总是注入工具指引",
+    "items": {
+      "force_tool_guidance": {
+        "description": "强制工具指引",
+        "type": "bool",
+        "hint": "启用后始终注入工具指引，禁用 impression query 检测",
+        "default": false
+      }
+    }
   }
 }

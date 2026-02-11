@@ -319,6 +319,32 @@ class ImpressionStore:
             ).fetchall()
             return [str(row["group_id"]) for row in rows if row["group_id"]]
 
+    def get_profile_any_group(self, user_id: str) -> ProfileRecord | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM profiles
+                WHERE user_id=?
+                ORDER BY updated_at DESC
+                LIMIT 1
+                """,
+                (user_id,),
+            ).fetchone()
+            if not row:
+                return None
+            return ProfileRecord(
+                group_id=row["group_id"],
+                user_id=row["user_id"],
+                nickname=row["nickname"],
+                last_seen=row["last_seen"],
+                summary=row["summary"],
+                traits=self._load_list(row["traits"]),
+                facts=self._load_list(row["facts"]),
+                examples=self._load_list(row["examples"]),
+                updated_at=row["updated_at"],
+                version=row["version"] or 1,
+            )
+
     def get_recent_profiles_by_group(
         self, group_id: str, limit: int | None = None
     ) -> list[ProfileRecord]:
@@ -745,10 +771,10 @@ class ImpressionStore:
                 """
                 SELECT target_id, confidence, updated_at
                 FROM alias_map
-                WHERE group_id=? AND alias=?
+                WHERE alias=?
                 ORDER BY confidence DESC, updated_at DESC
                 """,
-                (group_id, alias),
+                (alias,),
             ).fetchall()
             return [dict(row) for row in rows]
 
