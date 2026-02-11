@@ -24,6 +24,10 @@ class PluginConfig:
     alias_analysis_batch_size: int
     update_provider_id: str
     alias_provider_id: str
+    attribution_provider_id: str
+    phase1_provider_id: str
+    phase2_provider_id: str
+    phase3_provider_id: str
     inject_max_chars: int
     inject_max_traits: int
     inject_max_facts: int
@@ -72,6 +76,10 @@ class PluginConfig:
             alias_analysis_batch_size=int(alias.get("alias_analysis_batch_size", 15)),
             update_provider_id=str(model.get("update_provider_id", "")).strip(),
             alias_provider_id=str(model.get("alias_provider_id", "")).strip(),
+            attribution_provider_id=str(model.get("attribution_provider_id", "")).strip(),
+            phase1_provider_id=str(model.get("phase1_provider_id", "")).strip(),
+            phase2_provider_id=str(model.get("phase2_provider_id", "")).strip(),
+            phase3_provider_id=str(model.get("phase3_provider_id", "")).strip(),
             inject_max_chars=int(injection.get("inject_max_chars", 600)),
             inject_max_traits=int(injection.get("inject_max_traits", 8)),
             inject_max_facts=int(injection.get("inject_max_facts", 6)),

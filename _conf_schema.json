@@ -141,6 +141,30 @@
         "type": "string",
         "hint": "留空则使用会话当前模型",
         "default": ""
+      },
+      "attribution_provider_id": {
+        "description": "语义归属模型 Provider ID",
+        "type": "string",
+        "hint": "留空则使用会话当前模型",
+        "default": ""
+      },
+      "phase1_provider_id": {
+        "description": "Phase1 模型 Provider ID",
+        "type": "string",
+        "hint": "留空则使用 update_provider_id / 会话当前模型",
+        "default": ""
+      },
+      "phase2_provider_id": {
+        "description": "Phase2 模型 Provider ID",
+        "type": "string",
+        "hint": "留空则使用 update_provider_id / 会话当前模型",
+        "default": ""
+      },
+      "phase3_provider_id": {
+        "description": "Phase3 模型 Provider ID",
+        "type": "string",
+        "hint": "留空则使用 update_provider_id / 会话当前模型",
+        "default": ""
       }
     }
   },

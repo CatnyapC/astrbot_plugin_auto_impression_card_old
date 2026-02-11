@@ -147,7 +147,9 @@ async def maybe_schedule_group_update(
                 )
                 start_ts = time.time()
                 debug_log("[AIC] Group attribution prompt:\n" + attribution_prompt)
-                provider_id = await _get_provider_id(context, config, umo)
+                provider_id = await _get_provider_id(
+                    context, config, umo, config.attribution_provider_id
+                )
                 if provider_id:
                     try:
                         resp = await context.llm_generate(
@@ -317,7 +319,9 @@ async def force_group_update(
             )
             start_ts = time.time()
             debug_log("[AIC] Group attribution prompt:\n" + attribution_prompt)
-            provider_id = await _get_provider_id(context, config, umo)
+            provider_id = await _get_provider_id(
+                context, config, umo, config.attribution_provider_id
+            )
             if provider_id:
                 try:
                     resp = await context.llm_generate(
@@ -504,7 +508,9 @@ async def _run_phase_updates(
     if not pending_by_user:
         return False
 
-    provider_id = await _get_provider_id(context, config, umo)
+    provider_id = await _get_provider_id(
+        context, config, umo, config.phase1_provider_id
+    )
     if not provider_id:
         return False
 
@@ -520,11 +526,11 @@ async def _run_phase_updates(
     phase1_start = time.time()
     debug_log("[AIC] Phase1 prompt:\n" + phase1_prompt)
     try:
-        resp = await context.llm_generate(
-            chat_provider_id=provider_id,
-            system_prompt=PHASE1_CANDIDATE_SYSTEM_PROMPT,
-            prompt=phase1_prompt,
-        )
+            resp = await context.llm_generate(
+                chat_provider_id=provider_id,
+                system_prompt=PHASE1_CANDIDATE_SYSTEM_PROMPT,
+                prompt=phase1_prompt,
+            )
     except Exception as exc:  # noqa: BLE001
         logger.error(f"LLM phase1 call failed: {exc}")
         return False
@@ -568,8 +574,11 @@ async def _run_phase_updates(
         phase2_start = time.time()
         debug_log("[AIC] Phase2 prompt:\n" + phase2_prompt)
         try:
+            phase2_provider_id = await _get_provider_id(
+                context, config, umo, config.phase2_provider_id
+            )
             resp = await context.llm_generate(
-                chat_provider_id=provider_id,
+                chat_provider_id=phase2_provider_id,
                 system_prompt=PHASE2_MERGE_SYSTEM_PROMPT,
                 prompt=phase2_prompt,
             )
@@ -611,8 +620,11 @@ async def _run_phase_updates(
     phase3_start = time.time()
     debug_log("[AIC] Phase3 prompt:\n" + summary_prompt)
     try:
+        phase3_provider_id = await _get_provider_id(
+            context, config, umo, config.phase3_provider_id
+        )
         resp = await context.llm_generate(
-            chat_provider_id=provider_id,
+            chat_provider_id=phase3_provider_id,
             system_prompt=PHASE3_SUMMARY_SYSTEM_PROMPT,
             prompt=summary_prompt,
         )
@@ -684,9 +696,15 @@ async def _run_phase_updates(
     return True
 
 
-async def _get_provider_id(context, config, umo: str) -> str:
+async def _get_provider_id(
+    context, config, umo: str, provider_override: str | None = None
+) -> str:
     try:
-        return config.update_provider_id or await context.get_current_chat_provider_id(umo=umo)
+        return (
+            (provider_override or "").strip()
+            or config.update_provider_id
+            or await context.get_current_chat_provider_id(umo=umo)
+        )
     except ProviderNotFoundError as exc:
         logger.warning(f"No LLM provider configured: {exc}")
         return ""

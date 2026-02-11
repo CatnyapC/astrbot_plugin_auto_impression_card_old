@@ -26,20 +26,45 @@
   - Valid entries are upserted into `alias_map` with confidence (0.5-0.95).
   - Each (speaker_id, target_id) pair is pruned to top 4 aliases by confidence.
 
+## Message Queue (Raw)
+- `message_queue` now stores raw messages (with `@id` and `[reply_to:id]`).
+- Plain-text filtering is only applied when plain text exists.
+- Impression updates pass raw messages to LLM to preserve attribution cues.
+- Analysis uses the current pending queue only; no extra time window/size cap
+  beyond existing thresholds (e.g. `Update.update_msg_threshold`).
+
 ## Impression Update (LLM)
 - Update mode: `Update.update_mode` supports:
   - `per_user`: per user prompt/update.
   - `group_batch`: batch multiple users in one prompt.
   - `hybrid`: run both.
-- Group batch prompt includes:
-  - Existing profiles JSON keyed by `user_id`.
-  - Known users list and id->nickname mapping for cross-target inference.
-  - New messages grouped by `speaker_id` and raw text (including @id and reply_to).
+- Four-step pipeline:
+  1. Semantic attribution (message -> target user_id)
+  2. Phase1 candidate extraction (traits/facts + evidence_ids)
+  3. Phase2 merge/replace (final traits/facts + mapping)
+  4. Phase3 summary update (summary only)
 - Optional semantic attribution step maps messages to target user_id (even without @/昵称).
   - Config: `Update.group_batch_enable_semantic_attribution`
   - Batch size cap is `Update.update_msg_threshold` (used as max messages per run).
+- Alias analysis is triggered before group updates to improve attribution.
+- Bot alias fixed mapping:
+  - `Basic.bot_user_id`
+  - `Basic.bot_aliases`
+- Model selection:
+  - `Model.alias_provider_id` for alias analysis
+  - `Model.attribution_provider_id` for attribution
+  - `Model.phase1_provider_id` / `phase2_provider_id` / `phase3_provider_id` for phases
+  - fall back to `Model.update_provider_id` then current session provider
+- Evidence storage:
+  - `profiles.examples` is not used.
+  - Evidence is stored in `impression_evidence` keyed by trait/fact.
+- Confidence:
+  - Phase 1 adds evidence-level confidence, joke likelihood, and source type.
+  - Phase 2 adds consistency marker.
+  - Final confidence computed via formula and stored per trait/fact.
+  - Evidence confidence is recomputed from all stored evidence with half-life decay.
 - Writeback:
   - Only users present in LLM output are updated.
   - All messages included in the prompt are deleted from `message_queue`.
- - Force update:
-   - If `Update.update_mode` is `group_batch`/`hybrid`, the force command triggers a single group batch update and clears included messages.
+- Force update:
+  - If `Update.update_mode` is `group_batch`/`hybrid`, the force command triggers a single group batch update and clears included messages.
