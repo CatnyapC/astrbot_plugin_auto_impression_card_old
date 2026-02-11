@@ -70,7 +70,7 @@ async def apply_injection(
     injections: list[str] = []
 
     if not needs_tool:
-        profile = await asyncio.to_thread(store.get_profile, group_id, user_id)
+        profile = await asyncio.to_thread(store.get_profile, user_id)
         if profile and profile.summary:
             injection = format_profile_for_injection(profile, config.inject_max_chars)
             if injection:
@@ -84,7 +84,7 @@ async def apply_injection(
             target_id = extract_target_id_from_mentions(event)
             if target_id and str(target_id) != user_id:
                 target_profile = await asyncio.to_thread(
-                    store.get_profile, group_id, str(target_id)
+                    store.get_profile, str(target_id)
                 )
                 if target_profile and target_profile.summary:
                     target_injection = format_profile_for_injection(

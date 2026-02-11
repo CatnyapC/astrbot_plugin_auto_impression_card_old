@@ -180,7 +180,7 @@ class AutoImpressionCard(Star):
 
                 if not target_id:
                     profiles = await asyncio.to_thread(
-                        self.store.find_profiles_by_nickname, group_id, target
+                        self.store.find_profiles_by_nickname, target
                     )
                     if len(profiles) == 1:
                         target_id = profiles[0].user_id
@@ -255,16 +255,12 @@ class AutoImpressionCard(Star):
                 "current speaker not allowed unless explicitly requested",
             )
 
-        profile = await asyncio.to_thread(self.store.get_profile, group_id, target_id)
-        if not profile or not profile.summary:
-            profile = await asyncio.to_thread(
-                self.store.get_profile_any_group, target_id
-            )
+        profile = await asyncio.to_thread(self.store.get_profile, target_id)
         if not profile or not profile.summary:
             return self._tool_result("not_found", "no profile for user")
 
         alias_rows = await asyncio.to_thread(
-            self.store.get_aliases_by_target, profile.group_id, target_id
+            self.store.get_aliases_by_target, group_id, target_id
         )
         aliases_by_speaker: dict[str, list[str]] = {}
         for row in alias_rows:
@@ -344,7 +340,7 @@ class AutoImpressionCard(Star):
             return self._tool_result("ambiguous", "alias matched multiple users", ids)
 
         profiles = await asyncio.to_thread(
-            self.store.find_profiles_by_nickname, group_id, alias
+            self.store.find_profiles_by_nickname, alias
         )
         if len(profiles) == 1:
             target_id = profiles[0].user_id
@@ -378,7 +374,7 @@ class AutoImpressionCard(Star):
             yield event.plain_result("请 @群友 或提供昵称")
             return
 
-        profile = await asyncio.to_thread(self.store.get_profile, group_id, target_id)
+        profile = await asyncio.to_thread(self.store.get_profile, target_id)
         if not profile or not profile.summary:
             yield event.plain_result("暂无该成员档案")
             return
@@ -584,15 +580,12 @@ class AutoImpressionCard(Star):
         return False
 
     def _format_profile_for_reply(self, profile: ProfileRecord) -> str:
-        traits = profile.traits[: self.config.inject_max_traits]
-        facts = profile.facts[: self.config.inject_max_facts]
+        impressions = profile.impressions[: self.config.inject_max_impressions]
         lines = [
             f"昵称: {profile.nickname or ''}",
         ]
-        if traits:
-            lines.append("Traits: " + ", ".join(traits))
-        if facts:
-            lines.append("Facts: " + "; ".join(facts))
+        if impressions:
+            lines.append("Impressions: " + "; ".join(impressions))
         return "\n".join(lines)
 
     def _debug_log(self, message: str) -> None:

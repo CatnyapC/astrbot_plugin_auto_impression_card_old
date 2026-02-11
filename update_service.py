@@ -151,7 +151,7 @@ async def maybe_schedule_group_update(
                 return
 
             profiles_by_user = {
-                user_id: await asyncio.to_thread(store.get_profile, group_id, user_id)
+                user_id: await asyncio.to_thread(store.get_profile, user_id)
                 for user_id in pending_by_user.keys()
             }
 
@@ -264,7 +264,7 @@ async def force_group_update(
             return False
 
         profiles_by_user = {
-            user_id: await asyncio.to_thread(store.get_profile, group_id, user_id)
+            user_id: await asyncio.to_thread(store.get_profile, user_id)
             for user_id in pending_by_user.keys()
         }
 
@@ -456,13 +456,13 @@ async def _run_phase_updates(
     users_for_merge = set()
     for user_id in known_user_ids:
         profile = profiles_by_user.get(user_id)
-        existing_traits = profile.traits if profile and user_id not in clear_old_user_ids else []
-        existing_facts = profile.facts if profile and user_id not in clear_old_user_ids else []
+        existing_impressions = (
+            profile.impressions if profile and user_id not in clear_old_user_ids else []
+        )
         existing_by_user[user_id] = {
-            "traits": existing_traits,
-            "facts": existing_facts,
+            "impressions": existing_impressions,
         }
-        if existing_traits or existing_facts:
+        if existing_impressions:
             users_for_merge.add(user_id)
 
     final_by_user: dict[str, dict] = {}
@@ -473,7 +473,7 @@ async def _run_phase_updates(
         phase2_prompt = build_phase2_prompt(
             {uid: existing_by_user[uid] for uid in users_for_merge},
             {
-                uid: candidate_by_user.get(uid, {"traits": {}, "facts": {}})
+                uid: candidate_by_user.get(uid, {"impressions": {}})
                 for uid in users_for_merge
             },
         )
@@ -500,8 +500,7 @@ async def _run_phase_updates(
             return False
         for user_id, payload in phase2_data.items():
             final_by_user[user_id] = {
-                "traits": payload.get("traits", []),
-                "facts": payload.get("facts", []),
+                "impressions": payload.get("impressions", []),
             }
             mapping_by_user[user_id] = payload.get("mapping", {})
             consistency_by_user[user_id] = payload.get("consistency", {})
@@ -509,17 +508,14 @@ async def _run_phase_updates(
     for user_id in known_user_ids:
         if user_id in final_by_user:
             continue
-        candidates = candidate_by_user.get(user_id, {"traits": {}, "facts": {}})
-        final_traits = list(candidates.get("traits", {}).keys())
-        final_facts = list(candidates.get("facts", {}).keys())
-        final_by_user[user_id] = {"traits": final_traits, "facts": final_facts}
+        candidates = candidate_by_user.get(user_id, {"impressions": {}})
+        final_impressions = list(candidates.get("impressions", {}).keys())
+        final_by_user[user_id] = {"impressions": final_impressions}
         mapping_by_user[user_id] = {
-            "traits": {t: [t] for t in final_traits},
-            "facts": {f: [f] for f in final_facts},
+            "impressions": {t: [t] for t in final_impressions},
         }
         consistency_by_user[user_id] = {
-            "traits": {t: "neutral" for t in final_traits},
-            "facts": {f: "neutral" for f in final_facts},
+            "impressions": {t: "neutral" for t in final_impressions},
         }
 
     summaries: dict[str, str] = {}
@@ -559,13 +555,11 @@ async def _run_phase_updates(
         nickname = profile.nickname if profile and profile.nickname else user_id
         last_seen = max(m.ts for m in pending_by_user[user_id])
         summary = summaries.get(user_id) or (profile.summary if profile else "") or ""
-        final_traits = final_by_user[user_id]["traits"]
-        final_facts = final_by_user[user_id]["facts"]
+        final_impressions = final_by_user[user_id]["impressions"]
         evidence_records = build_evidence_records(
             group_id,
             user_id,
-            final_traits,
-            final_facts,
+            final_impressions,
             mapping_by_user.get(user_id, {}),
             consistency_by_user.get(user_id, {}),
             candidate_by_user.get(user_id, {}),
@@ -574,46 +568,46 @@ async def _run_phase_updates(
         )
         if evidence_records:
             await asyncio.to_thread(store.insert_evidence, evidence_records)
-            _prune_evidence(store, group_id, user_id, final_traits, final_facts)
-        trait_conf_map = _recompute_confidence_map(
-            store, group_id, user_id, "trait", final_traits, trust_scores, config
+            _prune_evidence(store, group_id, user_id, final_impressions)
+        impression_conf_map = _recompute_confidence_map(
+            store, group_id, user_id, "impression", final_impressions, trust_scores, config
         )
-        fact_conf_map = _recompute_confidence_map(
-            store, group_id, user_id, "fact", final_facts, trust_scores, config
-        )
-        filtered_facts = []
-        for fact in final_facts:
-            conf = fact_conf_map.get(fact, 0.0)
-            if conf >= config.fact_confidence_min:
-                filtered_facts.append(fact)
+        filtered_impressions = []
+        for item in final_impressions:
+            conf = impression_conf_map.get(item, 0.0)
+            if conf >= config.impression_confidence_min:
+                filtered_impressions.append(item)
             else:
                 await asyncio.to_thread(
                     store.delete_evidence_for_item,
                     group_id,
                     user_id,
-                    "fact",
-                    fact,
+                    "impression",
+                    item,
                 )
-                fact_conf_map.pop(fact, None)
-        final_facts = filtered_facts
+                impression_conf_map.pop(item, None)
+        final_impressions = filtered_impressions
+
+        if impression_conf_map:
+            order = {item: idx for idx, item in enumerate(final_impressions)}
+            final_impressions.sort(
+                key=lambda x: (-float(impression_conf_map.get(x, 0.0)), order.get(x, 0))
+            )
 
         record = ProfileRecord(
-            group_id=group_id,
             user_id=user_id,
             nickname=nickname,
             last_seen=last_seen,
             summary=summary,
-            traits=final_traits,
-            facts=final_facts,
-            examples=[],
+            impressions=final_impressions,
+            impressions_confidence=impression_conf_map,
             updated_at=now,
             version=(profile.version if profile else 1),
         )
         await asyncio.to_thread(
             store.upsert_profile_with_confidence,
             record,
-            trait_conf_map,
-            fact_conf_map,
+            impression_conf_map,
         )
 
     return True
@@ -636,9 +630,8 @@ async def _get_provider_id(
 def _normalize_phase1_candidates(raw: dict[str, dict[str, list[dict]]]) -> dict[str, dict]:
     results: dict[str, dict] = {}
     for user_id, payload in raw.items():
-        traits = _normalize_candidate_items(payload.get("traits", []))
-        facts = _normalize_candidate_items(payload.get("facts", []))
-        results[user_id] = {"traits": traits, "facts": facts}
+        impressions = _normalize_candidate_items(payload.get("impressions", []))
+        results[user_id] = {"impressions": impressions}
     return results
 
 
@@ -705,20 +698,18 @@ def _prune_evidence(
     store: ImpressionStore,
     group_id: str,
     user_id: str,
-    traits: list[str],
-    facts: list[str],
+    impressions: list[str],
 ) -> None:
-    for item_text in traits:
-        store.prune_evidence(group_id, user_id, "trait", item_text, MAX_EVIDENCE_PER_ITEM)
-    for item_text in facts:
-        store.prune_evidence(group_id, user_id, "fact", item_text, MAX_EVIDENCE_PER_ITEM)
+    for item_text in impressions:
+        store.prune_evidence(
+            group_id, user_id, "impression", item_text, MAX_EVIDENCE_PER_ITEM
+        )
 
 
 def build_evidence_records(
     group_id: str,
     user_id: str,
-    final_traits: list[str],
-    final_facts: list[str],
+    final_impressions: list[str],
     mapping: dict,
     consistency: dict,
     candidates: dict,
@@ -727,64 +718,63 @@ def build_evidence_records(
 ) -> list[tuple]:
     records: list[tuple] = []
 
-    for item_type, final_items in ("trait", final_traits), ("fact", final_facts):
-        mapping_block = mapping.get(f"{item_type}s", {}) if isinstance(mapping, dict) else {}
-        consistency_block = (
-            consistency.get(f"{item_type}s", {}) if isinstance(consistency, dict) else {}
-        )
-        candidate_items = candidates.get(f"{item_type}s", {})
-        for item_text in final_items:
-            candidate_texts = []
-            if isinstance(mapping_block, dict) and item_text in mapping_block:
-                mapped = mapping_block.get(item_text)
-                if isinstance(mapped, list):
-                    candidate_texts = [str(x) for x in mapped if str(x).strip()]
-                elif isinstance(mapped, str):
-                    candidate_texts = [mapped]
-            if not candidate_texts:
-                candidate_texts = [item_text]
+    mapping_block = mapping.get("impressions", {}) if isinstance(mapping, dict) else {}
+    consistency_block = (
+        consistency.get("impressions", {}) if isinstance(consistency, dict) else {}
+    )
+    candidate_items = candidates.get("impressions", {})
+    for item_text in final_impressions:
+        candidate_texts = []
+        if isinstance(mapping_block, dict) and item_text in mapping_block:
+            mapped = mapping_block.get(item_text)
+            if isinstance(mapped, list):
+                candidate_texts = [str(x) for x in mapped if str(x).strip()]
+            elif isinstance(mapped, str):
+                candidate_texts = [mapped]
+        if not candidate_texts:
+            candidate_texts = [item_text]
 
-            evidence_msgs = []
-            for candidate_text in candidate_texts:
-                items = candidate_items.get(candidate_text, [])
-                for item in items:
-                    ev_id = item.get("evidence_id")
-                    if ev_id is None:
-                        continue
-                    msg = pending_by_id.get(ev_id)
-                    if not msg:
-                        continue
-                    evidence_conf = float(item.get("evidence_confidence", 0.6))
-                    joke_lik = float(item.get("joke_likelihood", 0.2))
-                    source_type = item.get("source_type", "other")
-                    consistency_tag = (
-                        consistency_block.get(item_text)
-                        if isinstance(consistency_block, dict)
-                        else None
-                    )
-                    evidence_msgs.append((msg, item, evidence_conf, joke_lik, source_type, consistency_tag))
-
-            evidence_msgs.sort(key=lambda x: (x[0].ts, x[0].id), reverse=True)
-            for msg, item, evidence_conf, joke_lik, source_type, consistency_tag in evidence_msgs[
-                :MAX_EVIDENCE_PER_ITEM
-            ]:
-                records.append(
-                    (
-                        group_id,
-                        user_id,
-                        item_type,
-                        item_text,
-                        msg.id,
-                        str(msg.user_id),
-                        msg.message,
-                        msg.ts,
-                        evidence_conf,
-                        joke_lik,
-                        source_type,
-                        consistency_tag,
-                        created_at,
-                    )
+        evidence_msgs = []
+        for candidate_text in candidate_texts:
+            items = candidate_items.get(candidate_text, [])
+            for item in items:
+                ev_id = item.get("evidence_id")
+                if ev_id is None:
+                    continue
+                msg = pending_by_id.get(ev_id)
+                if not msg:
+                    continue
+                evidence_conf = float(item.get("evidence_confidence", 0.6))
+                joke_lik = float(item.get("joke_likelihood", 0.2))
+                source_type = item.get("source_type", "other")
+                consistency_tag = (
+                    consistency_block.get(item_text)
+                    if isinstance(consistency_block, dict)
+                    else None
                 )
+                evidence_msgs.append((msg, item, evidence_conf, joke_lik, source_type, consistency_tag))
+
+        evidence_msgs.sort(key=lambda x: (x[0].ts, x[0].id), reverse=True)
+        for msg, item, evidence_conf, joke_lik, source_type, consistency_tag in evidence_msgs[
+            :MAX_EVIDENCE_PER_ITEM
+        ]:
+            records.append(
+                (
+                    group_id,
+                    user_id,
+                    "impression",
+                    item_text,
+                    msg.id,
+                    str(msg.user_id),
+                    msg.message,
+                    msg.ts,
+                    evidence_conf,
+                    joke_lik,
+                    source_type,
+                    consistency_tag,
+                    created_at,
+                )
+            )
     return records
 
 
@@ -844,11 +834,8 @@ def _should_run_phase3(
     for user_id in users_for_merge:
         items = final_by_user.get(user_id, {})
         profile = profiles_by_user.get(user_id)
-        old_traits = profile.traits if profile else []
-        old_facts = profile.facts if profile else []
-        if sorted(old_traits) != sorted(items.get("traits", [])):
-            return True
-        if sorted(old_facts) != sorted(items.get("facts", [])):
+        old_impressions = profile.impressions if profile else []
+        if sorted(old_impressions) != sorted(items.get("impressions", [])):
             return True
     return False
 
@@ -913,15 +900,14 @@ def build_phase2_prompt(
     candidates_by_user: dict[str, dict],
 ) -> str:
     lines = [
-        "Existing traits/facts (JSON by user_id):",
+        "Existing impressions (JSON by user_id):",
         json_dumps(existing_by_user),
         "",
-        "Candidate traits/facts (JSON by user_id):",
+        "Candidate impressions (JSON by user_id):",
         json_dumps(
             {
                 user_id: {
-                    "traits": list(payload.get("traits", {}).keys()),
-                    "facts": list(payload.get("facts", {}).keys()),
+                    "impressions": list(payload.get("impressions", {}).keys()),
                 }
                 for user_id, payload in candidates_by_user.items()
             }
@@ -939,11 +925,10 @@ def build_phase3_prompt(
         profile = profiles_by_user.get(user_id)
         payload[user_id] = {
             "summary": profile.summary if profile and profile.summary else "",
-            "traits": items.get("traits", []),
-            "facts": items.get("facts", []),
+            "impressions": items.get("impressions", []),
         }
     lines = [
-        "Final traits/facts with existing summaries (JSON by user_id):",
+        "Final impressions with existing summaries (JSON by user_id):",
         json_dumps(payload),
     ]
     return "\n".join(lines).strip()

@@ -82,10 +82,10 @@
         "hint": "证据贡献随时间衰减的半衰期",
         "default": 30.0
       },
-      "fact_confidence_min": {
-        "description": "事实最小置信度",
+      "impression_confidence_min": {
+        "description": "印象最小置信度",
         "type": "float",
-        "hint": "低于该阈值的 facts 将被丢弃",
+        "hint": "低于该阈值的 impressions 将被丢弃",
         "default": 0.1
       }
     }
@@ -100,15 +100,10 @@
         "type": "int",
         "default": 600
       },
-      "inject_max_traits": {
-        "description": "traits 最大数量",
+      "inject_max_impressions": {
+        "description": "impressions 最大数量",
         "type": "int",
-        "default": 8
-      },
-      "inject_max_facts": {
-        "description": "facts 最大数量",
-        "type": "int",
-        "default": 6
+        "default": 13
       }
     }
   },

@@ -80,6 +80,7 @@ async def maybe_schedule_alias_analysis(
                     "LLM alias analysis returned invalid JSON, keeping pending messages"
                 )
                 return
+            pending_by_id = {msg.id: msg for msg in pending}
 
             now = int(time.time())
             nickname_map = await asyncio.to_thread(
@@ -211,6 +212,7 @@ async def force_alias_analysis(
                     "LLM alias analysis returned invalid JSON, keeping pending messages"
                 )
                 return False
+            pending_by_id = {msg.id: msg for msg in pending}
 
             now = int(time.time())
             nickname_map = await asyncio.to_thread(

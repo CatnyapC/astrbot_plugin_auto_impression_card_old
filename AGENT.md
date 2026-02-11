@@ -34,11 +34,11 @@
   beyond existing thresholds (e.g. `Update.update_msg_threshold`).
 
 ## Impression Update (LLM)
-- Update mode: group batch only.
+- Update mode: group batch only (profiles are global; messages are still grouped by group_id).
 - Four-step pipeline:
   1. Semantic attribution (message -> target user_id)
-  2. Phase1 candidate extraction (traits/facts + evidence_ids)
-  3. Phase2 merge/replace (final traits/facts + mapping)
+  2. Phase1 candidate extraction (impressions + evidence_ids)
+  3. Phase2 merge/replace (final impressions + mapping)
   4. Phase3 summary update (summary only)
 - Optional semantic attribution step maps messages to target user_id (even without @/昵称).
   - Config: `Update.group_batch_enable_semantic_attribution`
@@ -60,17 +60,15 @@
     - speaker-specific alias_map
     - global alias_map (cross-group)
     - nickname
-  - If no profile in current group, it falls back to the most recently updated
-    profile for the same user_id across all groups.
+  - Profiles are global by user_id (no group_id in profiles).
 - Evidence storage:
-  - `profiles.examples` is not used.
-  - Evidence is stored in `impression_evidence` keyed by trait/fact.
+  - Evidence is stored in `impression_evidence` keyed by impression.
 - Confidence:
   - Phase 1 adds evidence-level confidence, joke likelihood, and source type.
   - Phase 2 adds consistency marker.
-  - Final confidence computed via formula and stored per trait/fact.
+  - Final confidence computed via formula and stored per impression.
   - Evidence confidence is recomputed from all stored evidence with half-life decay.
-- Facts below `Update.fact_confidence_min` are dropped (and evidence removed).
+- Impressions below `Update.impression_confidence_min` are dropped (and evidence removed).
 - Writeback:
   - Only users present in LLM output are updated.
   - All messages included in the prompt are deleted from `message_queue`.

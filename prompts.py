@@ -10,12 +10,11 @@ PROFILE_UPDATE_SYSTEM_PROMPT = """
 - 优先增量更新，不要大幅重写。
 - 总结应简洁稳定。
 - 仅使用简体中文输出。
-- summary 建议不超过 300 字；traits/facts 每条尽量 20 字以内。
+- summary 建议不超过 300 字；impressions 每条尽量 20 字以内。
 
 只输出 JSON，且仅包含以下键：
 - summary: string
-- traits: list[string]
-- facts: list[string]
+- impressions: list[string]
 """.strip()
 
 GROUP_PROFILE_UPDATE_SYSTEM_PROMPT = """
@@ -28,15 +27,14 @@ GROUP_PROFILE_UPDATE_SYSTEM_PROMPT = """
 - 优先增量更新，不要大幅重写。
 - 总结应简洁稳定。
 - 仅使用简体中文输出。
-- summary 建议不超过 300 字；traits/facts 每条尽量 20 字以内。
+- summary 建议不超过 300 字；impressions 每条尽量 20 字以内。
 - 可以根据消息中的 @ID / reply_to:ID / 昵称提及 更新被提及用户的档案，而不只更新发言者本人。
 - 需要跨用户更新时，必须使用已提供的 user_id。
 
 只输出 JSON，且仅包含以下键：
 - users: object，键为 user_id，值为对象，包含：
   - summary: string
-  - traits: list[string]
-  - facts: list[string]
+  - impressions: list[string]
 """.strip()
 
 GROUP_ATTRIBUTION_SYSTEM_PROMPT = """
@@ -58,50 +56,46 @@ GROUP_ATTRIBUTION_SYSTEM_PROMPT = """
 
 PHASE1_CANDIDATE_SYSTEM_PROMPT = """
 你是“群友印象候选条目”抽取助手。
-根据消息证据，为每个用户抽取候选 traits/facts，并给出证据消息 id。
+根据消息证据，为每个用户抽取候选 impressions，并给出证据消息 id。
 
 规则：
 - 仅使用简体中文输出。
 - 只使用提供的 user_id。
-- traits/facts 要简洁稳定，避免冗长句子。
+- impressions 要简洁稳定，避免冗长句子。
 - 如果无法判断，输出空列表。
 
 只输出 JSON，且仅包含以下键：
 - users: object，键为 user_id，值为对象，包含：
-  - traits: list[object]，每个对象包含：
+  - impressions: list[object]，每个对象包含：
     - text: string
     - evidence_ids: list[number]
     - evidence_confidences: list[number]  (与 evidence_ids 一一对应, 0-1)
     - joke_likelihoods: list[number] (与 evidence_ids 一一对应, 0-1)
     - source_types: list[string] ("self"|"other", 与 evidence_ids 一一对应)
-  - facts: list[object]，同上
 """.strip()
 
 PHASE2_MERGE_SYSTEM_PROMPT = """
 你是“群友印象合并”助手。
-基于现有 traits/facts 与候选条目，输出最终 traits/facts，并给出映射关系。
+基于现有 impressions 与候选条目，输出最终 impressions，并给出映射关系。
 
 规则：
 - 仅使用简体中文输出。
 - 只使用提供的 user_id。
-- traits/facts 要简洁稳定，避免冗长句子。
+- impressions 要简洁稳定，避免冗长句子。
 - 去重、合并同义项；必要时可替换旧条目。
 
 只输出 JSON，且仅包含以下键：
 - users: object，键为 user_id，值为对象，包含：
-  - traits: list[string]
-  - facts: list[string]
+  - impressions: list[string]
   - mapping: object，包含：
-    - traits: object (final_text -> list[candidate_text])
-    - facts: object (final_text -> list[candidate_text])
+    - impressions: object (final_text -> list[candidate_text])
   - consistency: object，包含：
-    - traits: object (final_text -> "consistent"|"neutral"|"conflicting")
-    - facts: object (final_text -> "consistent"|"neutral"|"conflicting")
+    - impressions: object (final_text -> "consistent"|"neutral"|"conflicting")
 """.strip()
 
 PHASE3_SUMMARY_SYSTEM_PROMPT = """
 你是“群友印象总结”助手。
-基于最终 traits/facts 更新 summary。
+基于最终 impressions 更新 summary。
 
 规则：
 - 仅使用简体中文输出。

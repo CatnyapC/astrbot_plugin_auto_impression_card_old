@@ -136,14 +136,14 @@ def parse_profile_json(text: str, existing: dict) -> tuple[dict, bool]:
         return {}, False
 
     summary = str(data.get("summary", "")).strip() or existing.get("summary", "")
-    traits = data.get("traits")
-    facts = data.get("facts")
+    impressions = data.get("impressions")
 
     return (
         {
             "summary": summary,
-            "traits": safe_list(traits, existing.get("traits", [])),
-            "facts": safe_list(facts, existing.get("facts", [])),
+            "impressions": safe_list(
+                impressions, existing.get("impressions", [])
+            ),
         },
         True,
     )
@@ -186,12 +186,12 @@ def parse_group_profile_json(
             continue
         existing = existing_by_user[user_id]
         summary = str(payload.get("summary", "")).strip() or existing.get("summary", "")
-        traits = payload.get("traits")
-        facts = payload.get("facts")
+        impressions = payload.get("impressions")
         results[user_id] = {
             "summary": summary,
-            "traits": safe_list(traits, existing.get("traits", [])),
-            "facts": safe_list(facts, existing.get("facts", [])),
+            "impressions": safe_list(
+                impressions, existing.get("impressions", [])
+            ),
         }
 
     if not results:
@@ -218,9 +218,12 @@ def parse_phase1_candidates(
         user_id = str(user_id).strip()
         if user_id not in known_user_ids or not isinstance(payload, dict):
             continue
-        traits = payload.get("traits") if isinstance(payload.get("traits"), list) else []
-        facts = payload.get("facts") if isinstance(payload.get("facts"), list) else []
-        results[user_id] = {"traits": traits, "facts": facts}
+        impressions = (
+            payload.get("impressions")
+            if isinstance(payload.get("impressions"), list)
+            else []
+        )
+        results[user_id] = {"impressions": impressions}
     if not results:
         return {}, False
     return results, True
@@ -245,15 +248,17 @@ def parse_phase2_merge(
         user_id = str(user_id).strip()
         if user_id not in known_user_ids or not isinstance(payload, dict):
             continue
-        traits = payload.get("traits") if isinstance(payload.get("traits"), list) else []
-        facts = payload.get("facts") if isinstance(payload.get("facts"), list) else []
+        impressions = (
+            payload.get("impressions")
+            if isinstance(payload.get("impressions"), list)
+            else []
+        )
         mapping = payload.get("mapping") if isinstance(payload.get("mapping"), dict) else {}
         consistency = (
             payload.get("consistency") if isinstance(payload.get("consistency"), dict) else {}
         )
         results[user_id] = {
-            "traits": [str(x) for x in traits if str(x).strip()],
-            "facts": [str(x) for x in facts if str(x).strip()],
+            "impressions": [str(x) for x in impressions if str(x).strip()],
             "mapping": mapping,
             "consistency": consistency,
         }

@@ -18,7 +18,7 @@ class PluginConfig:
     group_batch_attribution_max_targets_per_message: int
     group_batch_attribution_include_summary: bool
     evidence_half_life_days: float
-    fact_confidence_min: float
+    impression_confidence_min: float
     bot_user_id: str
     bot_aliases: list[str]
     alias_analysis_batch_size: int
@@ -29,8 +29,7 @@ class PluginConfig:
     phase2_provider_id: str
     phase3_provider_id: str
     inject_max_chars: int
-    inject_max_traits: int
-    inject_max_facts: int
+    inject_max_impressions: int
     ignore_short_text_len: int
     ignore_regex: str
     force_tool_guidance: bool
@@ -71,7 +70,9 @@ class PluginConfig:
                 update.get("group_batch_attribution_include_summary", True)
             ),
             evidence_half_life_days=float(update.get("evidence_half_life_days", 30.0)),
-            fact_confidence_min=float(update.get("fact_confidence_min", 0.1)),
+            impression_confidence_min=float(
+                update.get("impression_confidence_min", update.get("fact_confidence_min", 0.1))
+            ),
             bot_user_id=str(basic.get("bot_user_id", "")).strip(),
             bot_aliases=[str(x).strip() for x in basic.get("bot_aliases", []) if str(x).strip()],
             alias_analysis_batch_size=int(alias.get("alias_analysis_batch_size", 15)),
@@ -82,8 +83,7 @@ class PluginConfig:
             phase2_provider_id=str(model.get("phase2_provider_id", "")).strip(),
             phase3_provider_id=str(model.get("phase3_provider_id", "")).strip(),
             inject_max_chars=int(injection.get("inject_max_chars", 600)),
-            inject_max_traits=int(injection.get("inject_max_traits", 8)),
-            inject_max_facts=int(injection.get("inject_max_facts", 6)),
+            inject_max_impressions=int(injection.get("inject_max_impressions", 13)),
             ignore_short_text_len=int(filters.get("ignore_short_text_len", 3)),
             ignore_regex=str(filters.get("ignore_regex", "")),
             force_tool_guidance=bool(tool.get("force_tool_guidance", False)),
