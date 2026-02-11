@@ -56,6 +56,8 @@
   - `Model.phase1_provider_id` / `phase2_provider_id` / `phase3_provider_id` for phases
   - fall back to `Model.update_provider_id` then current session provider
 - Alias confidence uses the same trust/decay formula and is computed from alias evidence.
+- Evidence half-life: `Update.evidence_half_life_days`
+- Global force update: `/印象更新` with `全体/全部/all/a` updates all known groups.
 - Evidence storage:
   - `profiles.examples` is not used.
   - Evidence is stored in `impression_evidence` keyed by trait/fact.

@@ -544,7 +544,7 @@ async def _run_phase_updates(
 
     candidate_by_user = _normalize_phase1_candidates(phase1_data)
     if not candidate_by_user:
-        return False
+        return True
 
     existing_by_user = {}
     users_for_merge = set()
@@ -616,28 +616,30 @@ async def _run_phase_updates(
             "facts": {f: "neutral" for f in final_facts},
         }
 
-    summary_prompt = build_phase3_prompt(final_by_user, profiles_by_user)
-    phase3_start = time.time()
-    debug_log("[AIC] Phase3 prompt:\n" + summary_prompt)
-    try:
-        phase3_provider_id = await _get_provider_id(
-            context, config, umo, config.phase3_provider_id
-        )
-        resp = await context.llm_generate(
-            chat_provider_id=phase3_provider_id,
-            system_prompt=PHASE3_SUMMARY_SYSTEM_PROMPT,
-            prompt=summary_prompt,
-        )
-    except Exception as exc:  # noqa: BLE001
-        logger.error(f"LLM phase3 call failed: {exc}")
-        return False
-    raw_text = resp.completion_text or ""
-    debug_log(f"[AIC] Phase3 duration: {time.time() - phase3_start:.2f}s")
-    debug_log("[AIC] Phase3 raw response:\n" + raw_text)
-    summaries, ok = parse_phase3_summaries(raw_text, known_user_ids)
-    if not ok:
-        logger.warning("LLM phase3 returned invalid JSON")
-        summaries = {}
+    summaries: dict[str, str] = {}
+    if _should_run_phase3(final_by_user, profiles_by_user, users_for_merge):
+        summary_prompt = build_phase3_prompt(final_by_user, profiles_by_user)
+        phase3_start = time.time()
+        debug_log("[AIC] Phase3 prompt:\n" + summary_prompt)
+        try:
+            phase3_provider_id = await _get_provider_id(
+                context, config, umo, config.phase3_provider_id
+            )
+            resp = await context.llm_generate(
+                chat_provider_id=phase3_provider_id,
+                system_prompt=PHASE3_SUMMARY_SYSTEM_PROMPT,
+                prompt=summary_prompt,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.error(f"LLM phase3 call failed: {exc}")
+            return False
+        raw_text = resp.completion_text or ""
+        debug_log(f"[AIC] Phase3 duration: {time.time() - phase3_start:.2f}s")
+        debug_log("[AIC] Phase3 raw response:\n" + raw_text)
+        summaries, ok = parse_phase3_summaries(raw_text, known_user_ids)
+        if not ok:
+            logger.warning("LLM phase3 returned invalid JSON")
+            summaries = {}
 
     now = int(time.time())
     pending_by_id = {msg.id: msg for msgs in pending_by_user.values() for msg in msgs}
@@ -909,6 +911,25 @@ def _recompute_confidence_map(
             prod *= 1 - signal
         result[item_text] = _clamp(1 - prod)
     return result
+
+
+def _should_run_phase3(
+    final_by_user: dict[str, dict],
+    profiles_by_user: dict[str, ProfileRecord | None],
+    users_for_merge: set[str],
+) -> bool:
+    if not users_for_merge:
+        return False
+    for user_id in users_for_merge:
+        items = final_by_user.get(user_id, {})
+        profile = profiles_by_user.get(user_id)
+        old_traits = profile.traits if profile else []
+        old_facts = profile.facts if profile else []
+        if sorted(old_traits) != sorted(items.get("traits", [])):
+            return True
+        if sorted(old_facts) != sorted(items.get("facts", [])):
+            return True
+    return False
 
 
 def build_group_attribution_prompt(
