@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import re
 import time
 
@@ -87,21 +88,48 @@ async def maybe_schedule_alias_analysis(
                 {item["speaker_id"] for item in aliases}
                 | {item["target_id"] for item in aliases},
             )
+            pending_by_id = {msg.id: msg for msg in pending}
             pairs: set[tuple[str, str]] = set()
             for item in aliases[:MAX_ALIAS_RESULTS]:
                 speaker_id = item["speaker_id"]
                 target_id = item["target_id"]
-                evidence_text = item.get("evidence_text") or ""
+                evidence_records = _build_alias_evidence_records(
+                    group_id,
+                    target_id,
+                    speaker_id,
+                    item,
+                    pending_by_id,
+                    now,
+                )
+                if evidence_records:
+                    await asyncio.to_thread(store.insert_evidence, evidence_records)
+                    await asyncio.to_thread(
+                        store.prune_evidence_by_speaker,
+                        group_id,
+                        target_id,
+                        "alias",
+                        f"alias:{item['alias']}",
+                        speaker_id,
+                        MAX_ALIASES_PER_PAIR,
+                    )
+                alias_conf = _recompute_alias_confidence(
+                    store,
+                    group_id,
+                    target_id,
+                    speaker_id,
+                    item["alias"],
+                    config.evidence_half_life_days,
+                )
                 await asyncio.to_thread(
                     store.upsert_alias,
                     group_id,
                     speaker_id,
                     item["alias"],
                     target_id,
-                    item["confidence"],
+                    alias_conf,
                     nickname_map.get(speaker_id),
                     nickname_map.get(target_id),
-                    evidence_text,
+                    "",
                     now,
                 )
                 pairs.add((speaker_id, target_id))
@@ -193,21 +221,48 @@ async def force_alias_analysis(
                 {item["speaker_id"] for item in aliases}
                 | {item["target_id"] for item in aliases},
             )
+            pending_by_id = {msg.id: msg for msg in pending}
             pairs: set[tuple[str, str]] = set()
             for item in aliases[:MAX_ALIAS_RESULTS]:
                 speaker_id = item["speaker_id"]
                 target_id = item["target_id"]
-                evidence_text = item.get("evidence_text") or ""
+                evidence_records = _build_alias_evidence_records(
+                    group_id,
+                    target_id,
+                    speaker_id,
+                    item,
+                    pending_by_id,
+                    now,
+                )
+                if evidence_records:
+                    await asyncio.to_thread(store.insert_evidence, evidence_records)
+                    await asyncio.to_thread(
+                        store.prune_evidence_by_speaker,
+                        group_id,
+                        target_id,
+                        "alias",
+                        f"alias:{item['alias']}",
+                        speaker_id,
+                        MAX_ALIASES_PER_PAIR,
+                    )
+                alias_conf = _recompute_alias_confidence(
+                    store,
+                    group_id,
+                    target_id,
+                    speaker_id,
+                    item["alias"],
+                    config.evidence_half_life_days,
+                )
                 await asyncio.to_thread(
                     store.upsert_alias,
                     group_id,
                     speaker_id,
                     item["alias"],
                     target_id,
-                    item["confidence"],
+                    alias_conf,
                     nickname_map.get(speaker_id),
                     nickname_map.get(target_id),
-                    evidence_text,
+                    "",
                     now,
                 )
                 pairs.add((speaker_id, target_id))
@@ -274,7 +329,9 @@ def build_alias_prompt(pending) -> str:
     ]
     for idx, msg in enumerate(pending, 1):
         ts_text = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(msg.ts))
-        lines.append(f"{idx}. [{ts_text}] speaker={msg.user_id} text={msg.message}")
+        lines.append(
+            f"{msg.id}. [{ts_text}] speaker={msg.user_id} text={msg.message}"
+        )
     return "\n".join(lines)
 
 
@@ -296,19 +353,37 @@ def parse_alias_json(text: str) -> tuple[list[dict], bool]:
         speaker_id = str(item.get("speaker_id", "")).strip()
         target_id = str(item.get("target_id", "")).strip()
         alias = str(item.get("alias", "")).strip()
-        evidence_text = str(item.get("evidence_text", "")).strip()
         if not speaker_id or not target_id or not alias:
             continue
         if not _is_clean_alias(alias):
             continue
         confidence = _normalize_confidence(item.get("confidence"))
+        evidence_ids = item.get("evidence_ids") if isinstance(item.get("evidence_ids"), list) else []
+        evidence_confidences = (
+            item.get("evidence_confidences")
+            if isinstance(item.get("evidence_confidences"), list)
+            else []
+        )
+        joke_likelihoods = (
+            item.get("joke_likelihoods")
+            if isinstance(item.get("joke_likelihoods"), list)
+            else []
+        )
+        source_types = (
+            item.get("source_types")
+            if isinstance(item.get("source_types"), list)
+            else []
+        )
         results.append(
             {
                 "speaker_id": speaker_id,
                 "target_id": target_id,
                 "alias": alias,
                 "confidence": confidence,
-                "evidence_text": evidence_text,
+                "evidence_ids": evidence_ids,
+                "evidence_confidences": evidence_confidences,
+                "joke_likelihoods": joke_likelihoods,
+                "source_types": source_types,
             }
         )
     return results, True
@@ -330,3 +405,88 @@ def _normalize_confidence(value) -> float:
     if conf > 0.95:
         return 0.95
     return conf
+
+
+def _build_alias_evidence_records(
+    group_id: str,
+    target_id: str,
+    speaker_id: str,
+    item: dict,
+    pending_by_id: dict[int, object],
+    created_at: int,
+) -> list[tuple]:
+    evidence_ids = item.get("evidence_ids", [])
+    evidence_confidences = item.get("evidence_confidences", [])
+    joke_likelihoods = item.get("joke_likelihoods", [])
+    source_types = item.get("source_types", [])
+    records: list[tuple] = []
+    for idx, ev in enumerate(evidence_ids):
+        try:
+            ev_id = int(ev)
+        except (TypeError, ValueError):
+            continue
+        msg = pending_by_id.get(ev_id)
+        if not msg:
+            continue
+        evidence_conf = (
+            float(evidence_confidences[idx])
+            if idx < len(evidence_confidences)
+            else 0.6
+        )
+        joke_lik = float(joke_likelihoods[idx]) if idx < len(joke_likelihoods) else 0.2
+        source_type = (
+            str(source_types[idx]).strip().lower()
+            if idx < len(source_types)
+            else "other"
+        )
+        records.append(
+            (
+                group_id,
+                target_id,
+                "alias",
+                f"alias:{item['alias']}",
+                msg.id,
+                str(speaker_id),
+                msg.message,
+                msg.ts,
+                evidence_conf,
+                joke_lik,
+                source_type if source_type in {"self", "other"} else "other",
+                None,
+                created_at,
+            )
+        )
+    return records
+
+
+def _recompute_alias_confidence(
+    store: ImpressionStore,
+    group_id: str,
+    target_id: str,
+    speaker_id: str,
+    alias: str,
+    half_life_days: float,
+) -> float:
+    rows = store.get_evidence_for_item_and_speaker(
+        group_id, target_id, "alias", f"alias:{alias}", speaker_id
+    )
+    if not rows:
+        return 0.0
+    half_life_sec = max(0.0, half_life_days) * 86400.0
+    now = time.time()
+    prod = 1.0
+    for row in rows:
+        evidence_conf = float(row.get("evidence_confidence") or 0.6)
+        joke_lik = float(row.get("joke_likelihood") or 0.2)
+        source_type = row.get("source_type") or "other"
+        source_weight = 1.0 if source_type == "self" else 0.7
+        trust = store.get_user_trust(group_id, speaker_id)
+        signal = evidence_conf * (1 - joke_lik) * source_weight * trust
+        if half_life_sec > 0:
+            delta = max(0.0, now - float(row.get("message_ts") or now))
+            decay = math.exp(-delta / half_life_sec)
+        else:
+            decay = 1.0
+        signal = max(0.0, min(1.0, signal * decay))
+        prod *= 1 - signal
+    return max(0.0, min(1.0, 1 - prod))

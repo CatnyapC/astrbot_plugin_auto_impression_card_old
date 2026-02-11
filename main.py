@@ -312,11 +312,13 @@ class AutoImpressionCard(Star):
         if not group_id:
             return
 
-        clear_old = "清空" in event.message_str.split()
+        message_tokens = event.message_str.split()
+        clear_old = "清空" in message_tokens
+        global_update = self._has_global_update_flag(message_tokens)
         target_id = extract_target_id_from_mentions(event)
         if not target_id:
             alias = self._extract_alias_from_command(
-                event.message_str, ignore_tokens={"清空"}
+                event.message_str, ignore_tokens={"清空", "全体", "全部", "all", "a", "A"}
             )
             if alias:
                 target_id = await resolve_alias(
@@ -326,42 +328,87 @@ class AutoImpressionCard(Star):
         if not target_id:
             target_id = str(event.get_sender_id())
 
+        update_mode = (self.config.update_mode or "group_batch").lower()
         nickname = event.get_sender_name() or target_id
 
-        update_mode = (self.config.update_mode or "group_batch").lower()
         yield event.plain_result("正在强制更新印象档案...")
-        if update_mode in {"group_batch", "hybrid"}:
-            await force_alias_analysis(
-                self.context,
-                self.store,
-                self.config,
-                self._debug_log,
-                self._alias_update_locks,
-                group_id,
-                event.unified_msg_origin,
-            )
-            ok = await force_group_update(
-                self.context,
-                self.store,
-                self.config,
-                self._debug_log,
-                self._group_update_locks,
-                event.unified_msg_origin,
-                group_id,
-            )
+        if global_update:
+            group_ids = await asyncio.to_thread(self.store.get_group_ids)
+            ok = False
+            for gid in group_ids:
+                if update_mode in {"group_batch", "hybrid"}:
+                    await force_alias_analysis(
+                        self.context,
+                        self.store,
+                        self.config,
+                        self._debug_log,
+                        self._alias_update_locks,
+                        gid,
+                        event.unified_msg_origin,
+                    )
+                    updated = await force_group_update(
+                        self.context,
+                        self.store,
+                        self.config,
+                        self._debug_log,
+                        self._group_update_locks,
+                        event.unified_msg_origin,
+                        gid,
+                    )
+                else:
+                    profile = await asyncio.to_thread(
+                        self.store.get_profile, gid, target_id
+                    )
+                    if not profile:
+                        updated = False
+                    else:
+                        nickname = profile.nickname if profile.nickname else target_id
+                        updated = await force_update(
+                            self.context,
+                            self.store,
+                            self.config,
+                            self._debug_log,
+                            self._update_locks,
+                            event.unified_msg_origin,
+                            gid,
+                            target_id,
+                            nickname,
+                            clear_old,
+                        )
+                ok = ok or updated
         else:
-            ok = await force_update(
-                self.context,
-                self.store,
-                self.config,
-                self._debug_log,
-                self._update_locks,
-                event.unified_msg_origin,
-                group_id,
-                target_id,
-                nickname,
-                clear_old,
-            )
+            if update_mode in {"group_batch", "hybrid"}:
+                await force_alias_analysis(
+                    self.context,
+                    self.store,
+                    self.config,
+                    self._debug_log,
+                    self._alias_update_locks,
+                    group_id,
+                    event.unified_msg_origin,
+                )
+                ok = await force_group_update(
+                    self.context,
+                    self.store,
+                    self.config,
+                    self._debug_log,
+                    self._group_update_locks,
+                    event.unified_msg_origin,
+                    group_id,
+                )
+            else:
+                ok = await force_update(
+                    self.context,
+                    self.store,
+                    self.config,
+                    self._debug_log,
+                    self._update_locks,
+                    event.unified_msg_origin,
+                    group_id,
+                    target_id,
+                    nickname,
+                    clear_old,
+                )
         if ok:
             yield event.plain_result("印象档案已更新")
         else:
@@ -508,6 +555,15 @@ class AutoImpressionCard(Star):
     def _debug_log(self, message: str) -> None:
         if self.config.debug_mode:
             logger.info(message)
+
+    @staticmethod
+    def _has_global_update_flag(tokens: list[str]) -> bool:
+        for token in tokens:
+            if token in {"全体", "全部", "all", "a", "A"}:
+                return True
+            if "全体" in token or "全部" in token:
+                return True
+        return False
 
     async def _run_group_update_with_alias(self, group_id: str, umo: str) -> None:
         await maybe_schedule_alias_analysis(

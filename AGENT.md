@@ -55,6 +55,7 @@
   - `Model.attribution_provider_id` for attribution
   - `Model.phase1_provider_id` / `phase2_provider_id` / `phase3_provider_id` for phases
   - fall back to `Model.update_provider_id` then current session provider
+- Alias confidence uses the same trust/decay formula and is computed from alias evidence.
 - Evidence storage:
   - `profiles.examples` is not used.
   - Evidence is stored in `impression_evidence` keyed by trait/fact.
@@ -68,3 +69,4 @@
   - All messages included in the prompt are deleted from `message_queue`.
 - Force update:
   - If `Update.update_mode` is `group_batch`/`hybrid`, the force command triggers a single group batch update and clears included messages.
+  - Add keyword `全体`/`全部`/`all`/`a` to update all known groups.

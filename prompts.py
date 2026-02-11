@@ -132,5 +132,8 @@ ALIAS_ANALYSIS_SYSTEM_PROMPT = """
   - target_id: string
   - alias: string
   - confidence: number（0.5-0.95）
-  - evidence_text: string（原消息中能证明该称呼的片段，尽量短）
+  - evidence_ids: list[number]（消息 id）
+  - evidence_confidences: list[number]（与 evidence_ids 对应，0-1）
+  - joke_likelihoods: list[number]（与 evidence_ids 对应，0-1）
+  - source_types: list[string]（与 evidence_ids 对应，“self”或“other”）
 """.strip()

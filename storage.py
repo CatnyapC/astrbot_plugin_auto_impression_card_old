@@ -299,6 +299,17 @@ class ImpressionStore:
                 version=row["version"] or 1,
             )
 
+    def get_group_ids(self) -> list[str]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT DISTINCT group_id FROM profiles
+                UNION
+                SELECT DISTINCT group_id FROM message_queue
+                """
+            ).fetchall()
+            return [str(row["group_id"]) for row in rows if row["group_id"]]
+
     def get_recent_profiles_by_group(
         self, group_id: str, limit: int | None = None
     ) -> list[ProfileRecord]:
@@ -480,6 +491,58 @@ class ImpressionStore:
                 (group_id, user_id, item_type, item_text),
             ).fetchall()
             return [dict(row) for row in rows]
+
+    def get_evidence_for_item_and_speaker(
+        self,
+        group_id: str,
+        user_id: str,
+        item_type: str,
+        item_text: str,
+        speaker_id: str,
+    ) -> list[dict]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT message_id, speaker_id, message_ts, evidence_confidence,
+                       joke_likelihood, source_type, consistency_tag
+                FROM impression_evidence
+                WHERE group_id=? AND user_id=? AND item_type=? AND item_text=? AND speaker_id=?
+                ORDER BY message_ts DESC, id DESC
+                """,
+                (group_id, user_id, item_type, item_text, speaker_id),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def prune_evidence_by_speaker(
+        self,
+        group_id: str,
+        user_id: str,
+        item_type: str,
+        item_text: str,
+        speaker_id: str,
+        max_items: int,
+    ) -> None:
+        if max_items <= 0:
+            return
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT id FROM impression_evidence
+                WHERE group_id=? AND user_id=? AND item_type=? AND item_text=? AND speaker_id=?
+                ORDER BY message_ts DESC, id DESC
+                LIMIT -1 OFFSET ?
+                """,
+                (group_id, user_id, item_type, item_text, speaker_id, max_items),
+            ).fetchall()
+            ids = [row["id"] for row in rows]
+            if not ids:
+                return
+            placeholders = ",".join(["?"] * len(ids))
+            conn.execute(
+                f"DELETE FROM impression_evidence WHERE id IN ({placeholders})",
+                ids,
+            )
+            conn.commit()
 
     def get_user_trust(self, group_id: str, user_id: str) -> float:
         with self._connect() as conn:
