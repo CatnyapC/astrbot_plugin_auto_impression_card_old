@@ -9,7 +9,6 @@ from astrbot.core.config.astrbot_config import AstrBotConfig
 @dataclass(slots=True)
 class PluginConfig:
     enabled: bool
-    update_mode: str
     update_msg_threshold: int
     update_time_threshold_sec: int
     group_batch_known_users_max: int
@@ -49,8 +48,6 @@ class PluginConfig:
 
         return cls(
             enabled=bool(basic.get("enabled", True)),
-            update_mode=str(update.get("update_mode", "group_batch")).strip()
-            or "group_batch",
             update_msg_threshold=int(update.get("update_msg_threshold", 50)),
             update_time_threshold_sec=int(update.get("update_time_threshold_sec", 7200)),
             group_batch_known_users_max=int(

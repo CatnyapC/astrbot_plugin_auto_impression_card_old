@@ -10,7 +10,7 @@ from astrbot.api import logger
 from astrbot.core.exceptions import ProviderNotFoundError
 from .prompts import ALIAS_ANALYSIS_SYSTEM_PROMPT
 from .storage import ImpressionStore
-from .update_service import force_update
+from .update_service import force_group_update
 from .utils import extract_json
 
 MAX_ALIAS_PENDING_MESSAGES = 200
@@ -141,15 +141,14 @@ async def maybe_schedule_alias_analysis(
                     MAX_ALIASES_PER_PAIR,
                 )
 
-            await _force_updates_for_alias_targets(
+            await force_group_update(
                 context,
                 store,
                 config,
                 debug_log,
                 update_locks,
-                group_id,
                 umo,
-                {item["target_id"] for item in aliases},
+                group_id,
             )
         except Exception as exc:  # noqa: BLE001
             logger.error(f"Alias analysis failed: {exc}")
@@ -273,52 +272,19 @@ async def force_alias_analysis(
                     MAX_ALIASES_PER_PAIR,
                 )
 
-            await _force_updates_for_alias_targets(
+            await force_group_update(
                 context,
                 store,
                 config,
                 debug_log,
                 update_locks,
-                group_id,
                 umo,
-                {item["target_id"] for item in aliases},
+                group_id,
             )
             return True
         except Exception as exc:  # noqa: BLE001
             logger.error(f"Alias analysis failed: {exc}")
             return False
-
-
-async def _force_updates_for_alias_targets(
-    context,
-    store: ImpressionStore,
-    config,
-    debug_log,
-    update_locks: dict[str, asyncio.Lock],
-    group_id: str,
-    umo: str,
-    target_ids: set[str],
-) -> None:
-    for target_id in target_ids:
-        pending_count = await asyncio.to_thread(
-            store.get_pending_count, group_id, target_id
-        )
-        if pending_count <= 0:
-            continue
-        profile = await asyncio.to_thread(store.get_profile, group_id, target_id)
-        nickname = profile.nickname if profile and profile.nickname else target_id
-        await force_update(
-            context,
-            store,
-            config,
-            debug_log,
-            update_locks,
-            umo,
-            group_id,
-            target_id,
-            nickname,
-            clear_old=False,
-        )
 
 
 def build_alias_prompt(pending) -> str:

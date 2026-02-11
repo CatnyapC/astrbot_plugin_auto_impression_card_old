@@ -28,12 +28,6 @@
     "type": "object",
     "hint": "控制画像更新触发条件",
     "items": {
-      "update_mode": {
-        "description": "更新模式",
-        "type": "string",
-        "hint": "per_user: 每人单独更新；group_batch: 群内批量；hybrid: 两者并行",
-        "default": "group_batch"
-      },
       "update_msg_threshold": {
         "description": "消息阈值",
         "type": "int",

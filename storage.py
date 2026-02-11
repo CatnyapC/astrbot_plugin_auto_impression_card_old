@@ -135,6 +135,15 @@ class ImpressionStore:
             )
             cur.execute(
                 """
+                CREATE TABLE IF NOT EXISTS group_state (
+                    group_id TEXT NOT NULL,
+                    last_update INTEGER NOT NULL,
+                    PRIMARY KEY (group_id)
+                )
+                """
+            )
+            cur.execute(
+                """
                 CREATE INDEX IF NOT EXISTS idx_impression_evidence_item
                 ON impression_evidence (group_id, user_id, item_type, item_text, message_ts)
                 """
@@ -578,6 +587,27 @@ class ImpressionStore:
                     updated_at=excluded.updated_at
                 """,
                 (group_id, user_id, trust, int(time.time())),
+            )
+            conn.commit()
+
+    def get_group_last_update(self, group_id: str) -> int:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT last_update FROM group_state WHERE group_id=?",
+                (group_id,),
+            ).fetchone()
+            return int(row["last_update"]) if row else 0
+
+    def set_group_last_update(self, group_id: str, ts: int) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO group_state (group_id, last_update)
+                VALUES (?, ?)
+                ON CONFLICT(group_id) DO UPDATE SET
+                    last_update=excluded.last_update
+                """,
+                (group_id, ts),
             )
             conn.commit()
 

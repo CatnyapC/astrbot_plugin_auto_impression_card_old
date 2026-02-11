@@ -13,7 +13,7 @@ from .prompts import (
     PHASE2_MERGE_SYSTEM_PROMPT,
     PHASE3_SUMMARY_SYSTEM_PROMPT,
 )
-from .storage import GroupMessage, ImpressionStore, ProfileRecord
+from .storage import ImpressionStore, ProfileRecord
 from .utils import (
     extract_target_ids_from_raw_text,
     parse_attribution_json,
@@ -23,70 +23,7 @@ from .utils import (
 )
 import re
 
-MAX_PENDING_MESSAGES = 200
 MAX_EVIDENCE_PER_ITEM = 3
-
-
-async def maybe_schedule_update(
-    context,
-    store: ImpressionStore,
-    config,
-    debug_log,
-    active_updates: set[str],
-    update_locks: dict[str, asyncio.Lock],
-    group_id: str,
-    user_id: str,
-    nickname: str,
-    umo: str,
-) -> None:
-    key = f"{group_id}:{user_id}"
-    if key in active_updates:
-        return
-    active_updates.add(key)
-    lock = update_locks.setdefault(key, asyncio.Lock())
-    async with lock:
-        try:
-            max_batch_messages = max(1, config.update_msg_threshold)
-            pending = await asyncio.to_thread(
-                store.get_pending_messages,
-                group_id,
-                user_id,
-                min(MAX_PENDING_MESSAGES, max_batch_messages),
-            )
-            if not pending:
-                return
-            pending = _wrap_pending_messages(group_id, user_id, pending)
-
-            profile = await asyncio.to_thread(store.get_profile, group_id, user_id)
-            last_update = profile.updated_at if profile else 0
-            last_seen = max(p.ts for p in pending)
-            pending_count = len(pending)
-
-            if pending_count < config.update_msg_threshold:
-                if last_seen - last_update < config.update_time_threshold_sec:
-                    return
-
-            pending_by_user = {user_id: pending}
-            profiles_by_user = {user_id: profile}
-            ok = await _run_phase_updates(
-                context,
-                store,
-                config,
-                debug_log,
-                group_id,
-                pending_by_user,
-                profiles_by_user,
-                umo,
-                clear_old_user_ids=set(),
-            )
-            if ok:
-                await asyncio.to_thread(
-                    store.delete_pending_messages, [p.id for p in pending]
-                )
-        except Exception as exc:  # noqa: BLE001
-            logger.error(f"Impression update failed: {exc}")
-        finally:
-            active_updates.discard(key)
 
 
 async def maybe_schedule_group_update(
@@ -184,6 +121,7 @@ async def maybe_schedule_group_update(
                 group_id,
                 pending_by_user,
                 config,
+                debug_log,
             )
             if not eligible_users:
                 return
@@ -213,6 +151,9 @@ async def maybe_schedule_group_update(
                 clear_old_user_ids=set(),
             )
             if ok:
+                await asyncio.to_thread(
+                    store.set_group_last_update, group_id, int(time.time())
+                )
                 delete_ids = [msg.id for msgs in pending_by_user.values() for msg in msgs]
                 if delete_ids:
                     await asyncio.to_thread(store.delete_pending_messages, delete_ids)
@@ -220,51 +161,6 @@ async def maybe_schedule_group_update(
             logger.error(f"Group impression update failed: {exc}")
         finally:
             active_updates.discard(key)
-
-
-async def force_update(
-    context,
-    store: ImpressionStore,
-    config,
-    debug_log,
-    update_locks: dict[str, asyncio.Lock],
-    umo: str,
-    group_id: str,
-    user_id: str,
-    nickname: str,
-    clear_old: bool,
-) -> bool:
-    key = f"{group_id}:{user_id}"
-    lock = update_locks.setdefault(key, asyncio.Lock())
-    async with lock:
-        pending = await asyncio.to_thread(
-            store.get_pending_messages,
-            group_id,
-            user_id,
-            max(1, config.update_msg_threshold),
-        )
-        if not pending:
-            return False
-        pending = _wrap_pending_messages(group_id, user_id, pending)
-
-        profile = await asyncio.to_thread(store.get_profile, group_id, user_id)
-        profiles_by_user = {user_id: profile}
-        pending_by_user = {user_id: pending}
-        clear_old_ids = {user_id} if clear_old else set()
-        ok = await _run_phase_updates(
-            context,
-            store,
-            config,
-            debug_log,
-            group_id,
-            pending_by_user,
-            profiles_by_user,
-            umo,
-            clear_old_user_ids=clear_old_ids,
-        )
-        if ok:
-            await asyncio.to_thread(store.delete_pending_messages, [p.id for p in pending])
-        return ok
 
 
 async def force_group_update(
@@ -368,6 +264,9 @@ async def force_group_update(
             clear_old_user_ids=set(),
         )
         if ok:
+            await asyncio.to_thread(
+                store.set_group_last_update, group_id, int(time.time())
+            )
             delete_ids = [msg.id for msgs in pending_by_user.values() for msg in msgs]
             if delete_ids:
                 await asyncio.to_thread(store.delete_pending_messages, delete_ids)
@@ -409,21 +308,6 @@ def _build_pending_by_user(
         else:
             pending_by_user.setdefault(msg.user_id, []).append(msg)
     return pending_by_user
-
-
-def _wrap_pending_messages(group_id: str, user_id: str, pending) -> list[GroupMessage]:
-    wrapped: list[GroupMessage] = []
-    for msg in pending:
-        wrapped.append(
-            GroupMessage(
-                id=msg.id,
-                group_id=group_id,
-                user_id=user_id,
-                message=msg.message,
-                ts=msg.ts,
-            )
-        )
-    return wrapped
 
 
 def _resolve_bot_alias_targets(
@@ -479,17 +363,23 @@ async def _select_eligible_users(
     group_id: str,
     pending_by_user: dict[str, list],
     config,
+    debug_log,
 ) -> list[str]:
     eligible: list[str] = []
+    now = int(time.time())
+    group_last_update = await asyncio.to_thread(store.get_group_last_update, group_id)
     for user_id, msgs in pending_by_user.items():
-        last_seen = max(m.ts for m in msgs)
         pending_count = len(msgs)
         if pending_count >= config.update_msg_threshold:
+            debug_log(
+                f"[AIC] Auto update threshold reached for {group_id}:{user_id} "
+                f"(pending={pending_count}, threshold={config.update_msg_threshold})"
+            )
             eligible.append(user_id)
             continue
-        profile = await asyncio.to_thread(store.get_profile, group_id, user_id)
-        last_update = profile.updated_at if profile else 0
-        if last_seen - last_update >= config.update_time_threshold_sec:
+        if group_last_update == 0:
+            continue
+        if now - group_last_update >= config.update_time_threshold_sec:
             eligible.append(user_id)
     return eligible
 

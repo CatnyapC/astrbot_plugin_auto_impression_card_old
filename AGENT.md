@@ -34,10 +34,7 @@
   beyond existing thresholds (e.g. `Update.update_msg_threshold`).
 
 ## Impression Update (LLM)
-- Update mode: `Update.update_mode` supports:
-  - `per_user`: per user prompt/update.
-  - `group_batch`: batch multiple users in one prompt.
-  - `hybrid`: run both.
+- Update mode: group batch only.
 - Four-step pipeline:
   1. Semantic attribution (message -> target user_id)
   2. Phase1 candidate extraction (traits/facts + evidence_ids)
@@ -71,5 +68,5 @@
   - Only users present in LLM output are updated.
   - All messages included in the prompt are deleted from `message_queue`.
 - Force update:
-  - If `Update.update_mode` is `group_batch`/`hybrid`, the force command triggers a single group batch update and clears included messages.
+  - Force command triggers a single group batch update and clears included messages.
   - Add keyword `全体`/`全部`/`all`/`a` to update all known groups.
