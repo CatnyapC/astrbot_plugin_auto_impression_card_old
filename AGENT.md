@@ -66,6 +66,7 @@
   - Phase 2 adds consistency marker.
   - Final confidence computed via formula and stored per trait/fact.
   - Evidence confidence is recomputed from all stored evidence with half-life decay.
+- Facts below `Update.fact_confidence_min` are dropped (and evidence removed).
 - Writeback:
   - Only users present in LLM output are updated.
   - All messages included in the prompt are deleted from `message_queue`.

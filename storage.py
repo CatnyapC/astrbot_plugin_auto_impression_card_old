@@ -611,6 +611,19 @@ class ImpressionStore:
             )
             conn.commit()
 
+    def delete_evidence_for_item(
+        self, group_id: str, user_id: str, item_type: str, item_text: str
+    ) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                DELETE FROM impression_evidence
+                WHERE group_id=? AND user_id=? AND item_type=? AND item_text=?
+                """,
+                (group_id, user_id, item_type, item_text),
+            )
+            conn.commit()
+
     def upsert_alias(
         self,
         group_id: str,

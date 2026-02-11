@@ -88,7 +88,6 @@ async def maybe_schedule_alias_analysis(
                 {item["speaker_id"] for item in aliases}
                 | {item["target_id"] for item in aliases},
             )
-            pending_by_id = {msg.id: msg for msg in pending}
             pairs: set[tuple[str, str]] = set()
             for item in aliases[:MAX_ALIAS_RESULTS]:
                 speaker_id = item["speaker_id"]
@@ -221,7 +220,6 @@ async def force_alias_analysis(
                 {item["speaker_id"] for item in aliases}
                 | {item["target_id"] for item in aliases},
             )
-            pending_by_id = {msg.id: msg for msg in pending}
             pairs: set[tuple[str, str]] = set()
             for item in aliases[:MAX_ALIAS_RESULTS]:
                 speaker_id = item["speaker_id"]

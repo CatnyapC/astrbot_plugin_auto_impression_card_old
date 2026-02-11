@@ -19,6 +19,7 @@ class PluginConfig:
     group_batch_attribution_max_targets_per_message: int
     group_batch_attribution_include_summary: bool
     evidence_half_life_days: float
+    fact_confidence_min: float
     bot_user_id: str
     bot_aliases: list[str]
     alias_analysis_batch_size: int
@@ -71,6 +72,7 @@ class PluginConfig:
                 update.get("group_batch_attribution_include_summary", True)
             ),
             evidence_half_life_days=float(update.get("evidence_half_life_days", 30.0)),
+            fact_confidence_min=float(update.get("fact_confidence_min", 0.1)),
             bot_user_id=str(basic.get("bot_user_id", "")).strip(),
             bot_aliases=[str(x).strip() for x in basic.get("bot_aliases", []) if str(x).strip()],
             alias_analysis_batch_size=int(alias.get("alias_analysis_batch_size", 15)),

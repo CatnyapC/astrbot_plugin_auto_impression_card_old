@@ -675,6 +675,21 @@ async def _run_phase_updates(
         fact_conf_map = _recompute_confidence_map(
             store, group_id, user_id, "fact", final_facts, trust_scores, config
         )
+        filtered_facts = []
+        for fact in final_facts:
+            conf = fact_conf_map.get(fact, 0.0)
+            if conf >= config.fact_confidence_min:
+                filtered_facts.append(fact)
+            else:
+                await asyncio.to_thread(
+                    store.delete_evidence_for_item,
+                    group_id,
+                    user_id,
+                    "fact",
+                    fact,
+                )
+                fact_conf_map.pop(fact, None)
+        final_facts = filtered_facts
 
         record = ProfileRecord(
             group_id=group_id,

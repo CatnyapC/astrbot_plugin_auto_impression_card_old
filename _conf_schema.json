@@ -87,6 +87,12 @@
         "type": "float",
         "hint": "证据贡献随时间衰减的半衰期",
         "default": 30.0
+      },
+      "fact_confidence_min": {
+        "description": "事实最小置信度",
+        "type": "float",
+        "hint": "低于该阈值的 facts 将被丢弃",
+        "default": 0.1
       }
     }
   },
