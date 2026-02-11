@@ -10,13 +10,12 @@ PROFILE_UPDATE_SYSTEM_PROMPT = """
 - 优先增量更新，不要大幅重写。
 - 总结应简洁稳定。
 - 仅使用简体中文输出。
-- summary 建议不超过 300 字；traits/facts/examples 每条尽量 20 字以内。
+- summary 建议不超过 300 字；traits/facts 每条尽量 20 字以内。
 
 只输出 JSON，且仅包含以下键：
 - summary: string
 - traits: list[string]
 - facts: list[string]
-- examples: list[string]
 """.strip()
 
 GROUP_PROFILE_UPDATE_SYSTEM_PROMPT = """
@@ -29,7 +28,7 @@ GROUP_PROFILE_UPDATE_SYSTEM_PROMPT = """
 - 优先增量更新，不要大幅重写。
 - 总结应简洁稳定。
 - 仅使用简体中文输出。
-- summary 建议不超过 300 字；traits/facts/examples 每条尽量 20 字以内。
+- summary 建议不超过 300 字；traits/facts 每条尽量 20 字以内。
 - 可以根据消息中的 @ID / reply_to:ID / 昵称提及 更新被提及用户的档案，而不只更新发言者本人。
 - 需要跨用户更新时，必须使用已提供的 user_id。
 
@@ -38,7 +37,6 @@ GROUP_PROFILE_UPDATE_SYSTEM_PROMPT = """
   - summary: string
   - traits: list[string]
   - facts: list[string]
-  - examples: list[string]
 """.strip()
 
 GROUP_ATTRIBUTION_SYSTEM_PROMPT = """

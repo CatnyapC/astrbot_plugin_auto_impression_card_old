@@ -102,6 +102,21 @@ class ImpressionStore:
                 ON alias_map (group_id, speaker_id, alias)
                 """
             )
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS impression_evidence (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    group_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    item_type TEXT NOT NULL,
+                    item_text TEXT NOT NULL,
+                    message_id INTEGER NOT NULL,
+                    message_text TEXT NOT NULL,
+                    message_ts INTEGER NOT NULL,
+                    created_at INTEGER NOT NULL
+                )
+                """
+            )
             self._ensure_alias_map_columns(cur)
             conn.commit()
 
@@ -329,6 +344,28 @@ class ImpressionStore:
                     record.updated_at,
                     record.version,
                 ),
+            )
+            conn.commit()
+
+    def insert_evidence(self, records: list[tuple]) -> None:
+        if not records:
+            return
+        with self._connect() as conn:
+            conn.executemany(
+                """
+                INSERT INTO impression_evidence (
+                    group_id,
+                    user_id,
+                    item_type,
+                    item_text,
+                    message_id,
+                    message_text,
+                    message_ts,
+                    created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                records,
             )
             conn.commit()
 

@@ -133,14 +133,13 @@ def parse_profile_json(text: str, existing: dict) -> tuple[dict, bool]:
     summary = str(data.get("summary", "")).strip() or existing.get("summary", "")
     traits = data.get("traits")
     facts = data.get("facts")
-    examples = data.get("examples")
 
     return (
         {
             "summary": summary,
             "traits": safe_list(traits, existing.get("traits", [])),
             "facts": safe_list(facts, existing.get("facts", [])),
-            "examples": safe_list(examples, existing.get("examples", [])),
+            "examples": [],
         },
         True,
     )
@@ -185,12 +184,11 @@ def parse_group_profile_json(
         summary = str(payload.get("summary", "")).strip() or existing.get("summary", "")
         traits = payload.get("traits")
         facts = payload.get("facts")
-        examples = payload.get("examples")
         results[user_id] = {
             "summary": summary,
             "traits": safe_list(traits, existing.get("traits", [])),
             "facts": safe_list(facts, existing.get("facts", [])),
-            "examples": safe_list(examples, existing.get("examples", [])),
+            "examples": [],
         }
 
     if not results:

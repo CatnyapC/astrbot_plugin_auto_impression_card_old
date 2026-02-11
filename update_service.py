@@ -21,6 +21,7 @@ from .utils import (
 )
 
 MAX_PENDING_MESSAGES = 200
+MAX_EVIDENCE_PER_ITEM = 2
 
 
 async def maybe_schedule_update(
@@ -64,7 +65,6 @@ async def maybe_schedule_update(
                 "summary": profile.summary if profile else "",
                 "traits": profile.traits if profile else [],
                 "facts": profile.facts if profile else [],
-                "examples": profile.examples if profile else [],
             }
 
             try:
