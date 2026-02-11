@@ -55,6 +55,57 @@ GROUP_ATTRIBUTION_SYSTEM_PROMPT = """
   - target_ids: list[string]
 """.strip()
 
+PHASE1_CANDIDATE_SYSTEM_PROMPT = """
+你是“群友印象候选条目”抽取助手。
+根据消息证据，为每个用户抽取候选 traits/facts，并给出证据消息 id。
+
+规则：
+- 仅使用简体中文输出。
+- 只使用提供的 user_id。
+- traits/facts 要简洁稳定，避免冗长句子。
+- 如果无法判断，输出空列表。
+
+只输出 JSON，且仅包含以下键：
+- users: object，键为 user_id，值为对象，包含：
+  - traits: list[object]，每个对象包含：
+    - text: string
+    - evidence_ids: list[number]
+  - facts: list[object]，同上
+""".strip()
+
+PHASE2_MERGE_SYSTEM_PROMPT = """
+你是“群友印象合并”助手。
+基于现有 traits/facts 与候选条目，输出最终 traits/facts，并给出映射关系。
+
+规则：
+- 仅使用简体中文输出。
+- 只使用提供的 user_id。
+- traits/facts 要简洁稳定，避免冗长句子。
+- 去重、合并同义项；必要时可替换旧条目。
+
+只输出 JSON，且仅包含以下键：
+- users: object，键为 user_id，值为对象，包含：
+  - traits: list[string]
+  - facts: list[string]
+  - mapping: object，包含：
+    - traits: object (final_text -> list[candidate_text])
+    - facts: object (final_text -> list[candidate_text])
+""".strip()
+
+PHASE3_SUMMARY_SYSTEM_PROMPT = """
+你是“群友印象总结”助手。
+基于最终 traits/facts 更新 summary。
+
+规则：
+- 仅使用简体中文输出。
+- summary 建议不超过 300 字。
+- 不要编造事实。不确定时用“可能”表达。
+
+只输出 JSON，且仅包含以下键：
+- users: object，键为 user_id，值为对象，包含：
+  - summary: string
+""".strip()
+
 ALIAS_ANALYSIS_SYSTEM_PROMPT = """
 你是“群友称呼”抽取助手。
 从聊天消息中识别“昵称/别称”的使用，并输出结构化结果。

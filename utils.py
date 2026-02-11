@@ -139,7 +139,6 @@ def parse_profile_json(text: str, existing: dict) -> tuple[dict, bool]:
             "summary": summary,
             "traits": safe_list(traits, existing.get("traits", [])),
             "facts": safe_list(facts, existing.get("facts", [])),
-            "examples": [],
         },
         True,
     )
@@ -188,9 +187,93 @@ def parse_group_profile_json(
             "summary": summary,
             "traits": safe_list(traits, existing.get("traits", [])),
             "facts": safe_list(facts, existing.get("facts", [])),
-            "examples": [],
         }
 
+    if not results:
+        return {}, False
+    return results, True
+
+
+def parse_phase1_candidates(
+    text: str, known_user_ids: set[str]
+) -> tuple[dict[str, dict[str, list[dict]]], bool]:
+    raw = extract_json(text)
+    if not raw:
+        return {}, False
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}, False
+    users = data.get("users") if isinstance(data, dict) else None
+    if not isinstance(users, dict):
+        return {}, False
+
+    results: dict[str, dict[str, list[dict]]] = {}
+    for user_id, payload in users.items():
+        user_id = str(user_id).strip()
+        if user_id not in known_user_ids or not isinstance(payload, dict):
+            continue
+        traits = payload.get("traits") if isinstance(payload.get("traits"), list) else []
+        facts = payload.get("facts") if isinstance(payload.get("facts"), list) else []
+        results[user_id] = {"traits": traits, "facts": facts}
+    if not results:
+        return {}, False
+    return results, True
+
+
+def parse_phase2_merge(
+    text: str, known_user_ids: set[str]
+) -> tuple[dict[str, dict], bool]:
+    raw = extract_json(text)
+    if not raw:
+        return {}, False
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}, False
+    users = data.get("users") if isinstance(data, dict) else None
+    if not isinstance(users, dict):
+        return {}, False
+
+    results: dict[str, dict] = {}
+    for user_id, payload in users.items():
+        user_id = str(user_id).strip()
+        if user_id not in known_user_ids or not isinstance(payload, dict):
+            continue
+        traits = payload.get("traits") if isinstance(payload.get("traits"), list) else []
+        facts = payload.get("facts") if isinstance(payload.get("facts"), list) else []
+        mapping = payload.get("mapping") if isinstance(payload.get("mapping"), dict) else {}
+        results[user_id] = {
+            "traits": [str(x) for x in traits if str(x).strip()],
+            "facts": [str(x) for x in facts if str(x).strip()],
+            "mapping": mapping,
+        }
+    if not results:
+        return {}, False
+    return results, True
+
+
+def parse_phase3_summaries(
+    text: str, known_user_ids: set[str]
+) -> tuple[dict[str, str], bool]:
+    raw = extract_json(text)
+    if not raw:
+        return {}, False
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}, False
+    users = data.get("users") if isinstance(data, dict) else None
+    if not isinstance(users, dict):
+        return {}, False
+    results: dict[str, str] = {}
+    for user_id, payload in users.items():
+        user_id = str(user_id).strip()
+        if user_id not in known_user_ids or not isinstance(payload, dict):
+            continue
+        summary = str(payload.get("summary", "")).strip()
+        if summary:
+            results[user_id] = summary
     if not results:
         return {}, False
     return results, True

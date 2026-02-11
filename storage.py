@@ -117,7 +117,14 @@ class ImpressionStore:
                 )
                 """
             )
+            cur.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_impression_evidence_item
+                ON impression_evidence (group_id, user_id, item_type, item_text, message_ts)
+                """
+            )
             self._ensure_alias_map_columns(cur)
+            self._ensure_profile_columns(cur)
             conn.commit()
 
     def _connect(self) -> sqlite3.Connection:
@@ -137,6 +144,12 @@ class ImpressionStore:
             cur.execute("ALTER TABLE alias_map ADD COLUMN target_nickname TEXT")
         if "evidence_text" not in cols:
             cur.execute("ALTER TABLE alias_map ADD COLUMN evidence_text TEXT")
+
+    @staticmethod
+    def _ensure_profile_columns(cur: sqlite3.Cursor) -> None:
+        cols = {row[1] for row in cur.execute("PRAGMA table_info(profiles)")}
+        if "examples" not in cols:
+            cur.execute("ALTER TABLE profiles ADD COLUMN examples TEXT")
 
     def touch_profile(self, group_id: str, user_id: str, nickname: str, ts: int) -> None:
         with self._connect() as conn:
@@ -366,6 +379,36 @@ class ImpressionStore:
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 records,
+            )
+            conn.commit()
+
+    def prune_evidence(
+        self,
+        group_id: str,
+        user_id: str,
+        item_type: str,
+        item_text: str,
+        max_items: int,
+    ) -> None:
+        if max_items <= 0:
+            return
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT id FROM impression_evidence
+                WHERE group_id=? AND user_id=? AND item_type=? AND item_text=?
+                ORDER BY message_ts DESC, id DESC
+                LIMIT -1 OFFSET ?
+                """,
+                (group_id, user_id, item_type, item_text, max_items),
+            ).fetchall()
+            ids = [row["id"] for row in rows]
+            if not ids:
+                return
+            placeholders = ",".join(["?"] * len(ids))
+            conn.execute(
+                f"DELETE FROM impression_evidence WHERE id IN ({placeholders})",
+                ids,
             )
             conn.commit()
 

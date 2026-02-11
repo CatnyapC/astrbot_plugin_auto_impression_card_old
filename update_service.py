@@ -8,20 +8,21 @@ from astrbot.core.exceptions import ProviderNotFoundError
 
 from .prompts import (
     GROUP_ATTRIBUTION_SYSTEM_PROMPT,
-    GROUP_PROFILE_UPDATE_SYSTEM_PROMPT,
-    PROFILE_UPDATE_SYSTEM_PROMPT,
+    PHASE1_CANDIDATE_SYSTEM_PROMPT,
+    PHASE2_MERGE_SYSTEM_PROMPT,
+    PHASE3_SUMMARY_SYSTEM_PROMPT,
 )
 from .storage import ImpressionStore, ProfileRecord
 from .utils import (
     extract_target_ids_from_raw_text,
     parse_attribution_json,
-    parse_group_profile_json,
-    parse_profile_json,
-    plain_from_raw_text,
+    parse_phase1_candidates,
+    parse_phase2_merge,
+    parse_phase3_summaries,
 )
 
 MAX_PENDING_MESSAGES = 200
-MAX_EVIDENCE_PER_ITEM = 2
+MAX_EVIDENCE_PER_ITEM = 3
 
 
 async def maybe_schedule_update(
@@ -35,7 +36,7 @@ async def maybe_schedule_update(
     user_id: str,
     nickname: str,
     umo: str,
-    ) -> None:
+) -> None:
     key = f"{group_id}:{user_id}"
     if key in active_updates:
         return
@@ -43,11 +44,12 @@ async def maybe_schedule_update(
     lock = update_locks.setdefault(key, asyncio.Lock())
     async with lock:
         try:
+            max_batch_messages = max(1, config.update_msg_threshold)
             pending = await asyncio.to_thread(
                 store.get_pending_messages,
                 group_id,
                 user_id,
-                MAX_PENDING_MESSAGES,
+                min(MAX_PENDING_MESSAGES, max_batch_messages),
             )
             if not pending:
                 return
@@ -61,61 +63,23 @@ async def maybe_schedule_update(
                 if last_seen - last_update < config.update_time_threshold_sec:
                     return
 
-            existing = {
-                "summary": profile.summary if profile else "",
-                "traits": profile.traits if profile else [],
-                "facts": profile.facts if profile else [],
-            }
-
-            try:
-                provider_id = (
-                    config.update_provider_id
-                    or await context.get_current_chat_provider_id(umo=umo)
-                )
-            except ProviderNotFoundError as exc:
-                logger.warning(f"No LLM provider configured: {exc}")
-                return
-
-            prompt = build_update_prompt(existing, pending)
-            debug_log("[AIC] Update prompt:\n" + prompt)
-            try:
-                resp = await context.llm_generate(
-                    chat_provider_id=provider_id,
-                    system_prompt=PROFILE_UPDATE_SYSTEM_PROMPT,
-                    prompt=prompt,
-                )
-            except ProviderNotFoundError as exc:
-                logger.warning(f"Provider not found for impression update: {exc}")
-                return
-            except Exception as exc:  # noqa: BLE001
-                logger.error(f"LLM update call failed: {exc}")
-                return
-
-            debug_log("[AIC] Update raw response:\n" + (resp.completion_text or ""))
-            data, ok = parse_profile_json(resp.completion_text or "", existing)
-            if not ok:
-                logger.warning(
-                    "LLM update returned invalid JSON, keeping pending messages"
-                )
-                return
-
-            updated_at = int(time.time())
-            record = ProfileRecord(
-                group_id=group_id,
-                user_id=user_id,
-                nickname=profile.nickname if profile and profile.nickname else nickname,
-                last_seen=last_seen,
-                summary=data["summary"],
-                traits=data["traits"],
-                facts=data["facts"],
-                examples=data["examples"],
-                updated_at=updated_at,
-                version=(profile.version if profile else 1),
+            pending_by_user = {user_id: pending}
+            profiles_by_user = {user_id: profile}
+            ok = await _run_phase_updates(
+                context,
+                store,
+                config,
+                debug_log,
+                group_id,
+                pending_by_user,
+                profiles_by_user,
+                umo,
+                clear_old_user_ids=set(),
             )
-            await asyncio.to_thread(store.upsert_profile, record)
-            await asyncio.to_thread(
-                store.delete_pending_messages, [p.id for p in pending]
-            )
+            if ok:
+                await asyncio.to_thread(
+                    store.delete_pending_messages, [p.id for p in pending]
+                )
         except Exception as exc:  # noqa: BLE001
             logger.error(f"Impression update failed: {exc}")
         finally:
@@ -147,6 +111,8 @@ async def maybe_schedule_group_update(
             )
             if not pending:
                 return
+
+            pending_by_id = {msg.id: msg for msg in pending}
             recent_profiles = await asyncio.to_thread(
                 store.get_recent_profiles_by_group,
                 group_id,
@@ -163,27 +129,7 @@ async def maybe_schedule_group_update(
                     if nickname and nickname not in nickname_to_user:
                         nickname_to_user[nickname] = user_id
 
-            stats: dict[str, dict[str, int]] = {}
-            pending_by_id = {msg.id: msg for msg in pending}
-            mentioned_targets: set[str] = set()
-            for msg in pending:
-                stat = stats.setdefault(msg.user_id, {"count": 0, "last_seen": 0})
-                stat["count"] += 1
-                if msg.ts > stat["last_seen"]:
-                    stat["last_seen"] = msg.ts
-                mentioned_targets.update(extract_target_ids_from_raw_text(msg.message))
-                if nickname_to_user:
-                    for nickname, target_id in nickname_to_user.items():
-                        if target_id == msg.user_id:
-                            continue
-                        if nickname and nickname in msg.message:
-                            mentioned_targets.add(target_id)
-
-            eligible_users: list[str] = []
-            profile_cache: dict[str, ProfileRecord | None] = {}
-
             attribution_map: dict[int, list[str]] = {}
-            attributed_targets: set[str] = set()
             if config.group_batch_enable_semantic_attribution:
                 attribution_prompt = build_group_attribution_prompt(
                     pending[
@@ -196,15 +142,7 @@ async def maybe_schedule_group_update(
                     config.group_batch_attribution_include_summary,
                 )
                 debug_log("[AIC] Group attribution prompt:\n" + attribution_prompt)
-                try:
-                    provider_id = (
-                        config.update_provider_id
-                        or await context.get_current_chat_provider_id(umo=umo)
-                    )
-                except ProviderNotFoundError as exc:
-                    logger.warning(f"No LLM provider configured: {exc}")
-                    provider_id = ""
-
+                provider_id = await _get_provider_id(context, config, umo)
                 if provider_id:
                     try:
                         resp = await context.llm_generate(
@@ -217,156 +155,54 @@ async def maybe_schedule_group_update(
                         attribution_map, _ = parse_attribution_json(
                             raw_text, {p.user_id for p in recent_profiles}
                         )
-                        for msg_id, targets in attribution_map.items():
-                            msg = pending_by_id.get(msg_id)
-                            if not msg:
-                                continue
-                            for target_id in targets:
-                                attributed_targets.add(target_id)
-                                stat = stats.setdefault(
-                                    target_id, {"count": 0, "last_seen": 0}
-                                )
-                                stat["count"] += 1
-                                if msg.ts > stat["last_seen"]:
-                                    stat["last_seen"] = msg.ts
                     except Exception as exc:  # noqa: BLE001
                         logger.warning(f"LLM group attribution failed: {exc}")
 
-            for user_id, stat in stats.items():
-                if stat["count"] >= config.update_msg_threshold:
-                    eligible_users.append(user_id)
-                    continue
-                profile = await asyncio.to_thread(
-                    store.get_profile, group_id, user_id
-                )
-                profile_cache[user_id] = profile
-                last_update = profile.updated_at if profile else 0
-                if stat["last_seen"] - last_update >= config.update_time_threshold_sec:
-                    eligible_users.append(user_id)
+            pending_by_user = _build_pending_by_user(
+                pending,
+                attribution_map,
+                nickname_to_user,
+            )
+            if not pending_by_user:
+                return
 
-            if attributed_targets:
-                for user_id in attributed_targets:
-                    if user_id not in eligible_users:
-                        eligible_users.append(user_id)
-
+            eligible_users = await _select_eligible_users(
+                store,
+                group_id,
+                pending_by_user,
+                config,
+            )
             if not eligible_users:
                 return
 
-            pending_by_user: dict[str, list] = {uid: [] for uid in eligible_users}
-            for msg in pending:
-                targets = attribution_map.get(msg.id)
-                if targets:
-                    if config.group_batch_attribution_max_targets_per_message > 0:
-                        targets = targets[
-                            : config.group_batch_attribution_max_targets_per_message
-                        ]
-                    for target_id in targets:
-                        if target_id not in pending_by_user:
-                            continue
-                        bucket = pending_by_user[target_id]
-                        bucket.append(msg)
-                    continue
-
-                if msg.user_id not in pending_by_user:
-                    continue
-                bucket = pending_by_user[msg.user_id]
-                bucket.append(msg)
-
             pending_by_user = {
-                uid: msgs for uid, msgs in pending_by_user.items() if msgs
+                user_id: msgs
+                for user_id, msgs in pending_by_user.items()
+                if user_id in eligible_users
             }
             if not pending_by_user:
                 return
 
-            candidate_user_ids = (
-                set(pending_by_user.keys())
-                | mentioned_targets
-                | set(nickname_by_user.keys())
-            )
-            existing_by_user: dict[str, dict] = {}
-            profile_by_user: dict[str, ProfileRecord | None] = {}
-            for user_id in candidate_user_ids:
-                profile = profile_cache.get(user_id)
-                if profile is None:
-                    profile = await asyncio.to_thread(
-                        store.get_profile, group_id, user_id
-                    )
-                profile_by_user[user_id] = profile
-                existing_by_user[user_id] = {
-                    "nickname": profile.nickname if profile else "",
-                    "summary": profile.summary if profile else "",
-                    "traits": profile.traits if profile else [],
-                    "facts": profile.facts if profile else [],
-                    "examples": profile.examples if profile else [],
-                }
+            profiles_by_user = {
+                user_id: await asyncio.to_thread(store.get_profile, group_id, user_id)
+                for user_id in pending_by_user.keys()
+            }
 
-            try:
-                provider_id = (
-                    config.update_provider_id
-                    or await context.get_current_chat_provider_id(umo=umo)
-                )
-            except ProviderNotFoundError as exc:
-                logger.warning(f"No LLM provider configured: {exc}")
-                return
-
-            prompt = build_group_update_prompt(
-                existing_by_user,
+            ok = await _run_phase_updates(
+                context,
+                store,
+                config,
+                debug_log,
+                group_id,
                 pending_by_user,
-                sorted(candidate_user_ids),
-                nickname_by_user,
+                profiles_by_user,
+                umo,
+                clear_old_user_ids=set(),
             )
-            debug_log("[AIC] Group update prompt:\n" + prompt)
-            try:
-                resp = await context.llm_generate(
-                    chat_provider_id=provider_id,
-                    system_prompt=GROUP_PROFILE_UPDATE_SYSTEM_PROMPT,
-                    prompt=prompt,
-                )
-            except ProviderNotFoundError as exc:
-                logger.warning(f"Provider not found for group impression update: {exc}")
-                return
-            except Exception as exc:  # noqa: BLE001
-                logger.error(f"LLM group update call failed: {exc}")
-                return
-
-            raw_text = resp.completion_text or ""
-            debug_log("[AIC] Group update raw response:\n" + raw_text)
-            updates, ok = parse_group_profile_json(raw_text, existing_by_user)
-            if not ok:
-                logger.warning(
-                    "LLM group update returned invalid JSON, keeping pending messages"
-                )
-                return
-
-            now = int(time.time())
-            for user_id, data in updates.items():
-                msgs = pending_by_user.get(user_id)
-                if not msgs:
-                    continue
-                profile = profile_by_user.get(user_id)
-                nickname = (
-                    profile.nickname if profile and profile.nickname else user_id
-                )
-                last_seen = max(m.ts for m in msgs)
-                record = ProfileRecord(
-                    group_id=group_id,
-                    user_id=user_id,
-                    nickname=nickname,
-                    last_seen=last_seen,
-                    summary=data["summary"],
-                    traits=data["traits"],
-                    facts=data["facts"],
-                    examples=data["examples"],
-                    updated_at=now,
-                    version=(profile.version if profile else 1),
-                )
-                await asyncio.to_thread(store.upsert_profile, record)
-
-            delete_ids = [
-                msg.id for msgs in pending_by_user.values() for msg in msgs
-            ]
-            if delete_ids:
-                await asyncio.to_thread(store.delete_pending_messages, delete_ids)
+            if ok:
+                delete_ids = [msg.id for msgs in pending_by_user.values() for msg in msgs]
+                if delete_ids:
+                    await asyncio.to_thread(store.delete_pending_messages, delete_ids)
         except Exception as exc:  # noqa: BLE001
             logger.error(f"Group impression update failed: {exc}")
         finally:
@@ -392,74 +228,29 @@ async def force_update(
             store.get_pending_messages,
             group_id,
             user_id,
-            MAX_PENDING_MESSAGES,
+            max(1, config.update_msg_threshold),
         )
+        if not pending:
+            return False
+
         profile = await asyncio.to_thread(store.get_profile, group_id, user_id)
-        existing = {
-            "summary": "",
-            "traits": [],
-            "facts": [],
-            "examples": [],
-        }
-        if profile and not clear_old:
-            existing = {
-                "summary": profile.summary or "",
-                "traits": profile.traits,
-                "facts": profile.facts,
-                "examples": profile.examples,
-            }
-
-        try:
-            provider_id = (
-                config.update_provider_id
-                or await context.get_current_chat_provider_id(umo=umo)
-            )
-        except ProviderNotFoundError as exc:
-            logger.warning(f"No LLM provider configured: {exc}")
-            return False
-
-        prompt = build_update_prompt(existing, pending)
-        debug_log("[AIC] Force update prompt:\n" + prompt)
-        try:
-            resp = await context.llm_generate(
-                chat_provider_id=provider_id,
-                system_prompt=PROFILE_UPDATE_SYSTEM_PROMPT,
-                prompt=prompt,
-            )
-        except ProviderNotFoundError as exc:
-            logger.warning(f"Provider not found for impression update: {exc}")
-            return False
-        except Exception as exc:  # noqa: BLE001
-            logger.error(f"LLM update call failed: {exc}")
-            return False
-
-        debug_log("[AIC] Force update raw response:\n" + (resp.completion_text or ""))
-        data, ok = parse_profile_json(resp.completion_text or "", existing)
-        if not ok:
-            logger.warning("LLM update returned invalid JSON")
-            return False
-
-        updated_at = int(time.time())
-        last_seen = max([p.ts for p in pending], default=updated_at)
-        record = ProfileRecord(
-            group_id=group_id,
-            user_id=user_id,
-            nickname=profile.nickname if profile and profile.nickname else nickname,
-            last_seen=last_seen,
-            summary=data["summary"],
-            traits=data["traits"],
-            facts=data["facts"],
-            examples=data["examples"],
-            updated_at=updated_at,
-            version=(profile.version if profile else 1),
+        profiles_by_user = {user_id: profile}
+        pending_by_user = {user_id: pending}
+        clear_old_ids = {user_id} if clear_old else set()
+        ok = await _run_phase_updates(
+            context,
+            store,
+            config,
+            debug_log,
+            group_id,
+            pending_by_user,
+            profiles_by_user,
+            umo,
+            clear_old_user_ids=clear_old_ids,
         )
-        await asyncio.to_thread(store.upsert_profile, record)
-
-        if pending:
-            await asyncio.to_thread(
-                store.delete_pending_messages, [p.id for p in pending]
-            )
-        return True
+        if ok:
+            await asyncio.to_thread(store.delete_pending_messages, [p.id for p in pending])
+        return ok
 
 
 async def force_group_update(
@@ -474,22 +265,31 @@ async def force_group_update(
     key = f"group:{group_id}"
     lock = update_locks.setdefault(key, asyncio.Lock())
     async with lock:
+        max_batch_messages = max(1, config.update_msg_threshold)
         pending = await asyncio.to_thread(
             store.get_pending_messages_by_group,
             group_id,
-            max(1, config.update_msg_threshold),
+            max_batch_messages,
         )
         if not pending:
             return False
 
+        pending_by_id = {msg.id: msg for msg in pending}
         recent_profiles = await asyncio.to_thread(
             store.get_recent_profiles_by_group,
             group_id,
             config.group_batch_known_users_max,
         )
         nickname_by_user = {
-            p.user_id: (p.nickname or "").strip() for p in recent_profiles if p.nickname
+            p.user_id: (p.nickname or "").strip()
+            for p in recent_profiles
+            if p.nickname
         }
+        nickname_to_user: dict[str, str] = {}
+        if config.group_batch_enable_nickname_match:
+            for user_id, nickname in nickname_by_user.items():
+                if nickname and nickname not in nickname_to_user:
+                    nickname_to_user[nickname] = user_id
 
         attribution_map: dict[int, list[str]] = {}
         if config.group_batch_enable_semantic_attribution:
@@ -497,22 +297,14 @@ async def force_group_update(
                 pending[
                     : min(
                         config.group_batch_attribution_max_messages,
-                        max(1, config.update_msg_threshold),
+                        max_batch_messages,
                     )
                 ],
                 recent_profiles,
                 config.group_batch_attribution_include_summary,
             )
             debug_log("[AIC] Group attribution prompt:\n" + attribution_prompt)
-            try:
-                provider_id = (
-                    config.update_provider_id
-                    or await context.get_current_chat_provider_id(umo=umo)
-                )
-            except ProviderNotFoundError as exc:
-                logger.warning(f"No LLM provider configured: {exc}")
-                provider_id = ""
-
+            provider_id = await _get_provider_id(context, config, umo)
             if provider_id:
                 try:
                     resp = await context.llm_generate(
@@ -528,148 +320,353 @@ async def force_group_update(
                 except Exception as exc:  # noqa: BLE001
                     logger.warning(f"LLM group attribution failed: {exc}")
 
-        pending_by_user: dict[str, list] = {}
-        for msg in pending:
-            targets = attribution_map.get(msg.id)
-            if targets:
-                if config.group_batch_attribution_max_targets_per_message > 0:
-                    targets = targets[
-                        : config.group_batch_attribution_max_targets_per_message
-                    ]
-                for target_id in targets:
-                    pending_by_user.setdefault(target_id, []).append(msg)
-                continue
-            pending_by_user.setdefault(msg.user_id, []).append(msg)
-
-        pending_by_user = {
-            uid: msgs for uid, msgs in pending_by_user.items() if msgs
-        }
+        pending_by_user = _build_pending_by_user(
+            pending,
+            attribution_map,
+            nickname_to_user,
+        )
         if not pending_by_user:
             return False
 
-        candidate_user_ids = (
-            set(pending_by_user.keys()) | set(nickname_by_user.keys())
-        )
-        existing_by_user: dict[str, dict] = {}
-        profile_by_user: dict[str, ProfileRecord | None] = {}
-        for user_id in candidate_user_ids:
-            profile = await asyncio.to_thread(store.get_profile, group_id, user_id)
-            profile_by_user[user_id] = profile
-            existing_by_user[user_id] = {
-                "nickname": profile.nickname if profile else "",
-                "summary": profile.summary if profile else "",
-                "traits": profile.traits if profile else [],
-                "facts": profile.facts if profile else [],
-                "examples": profile.examples if profile else [],
-            }
+        profiles_by_user = {
+            user_id: await asyncio.to_thread(store.get_profile, group_id, user_id)
+            for user_id in pending_by_user.keys()
+        }
 
-        try:
-            provider_id = (
-                config.update_provider_id
-                or await context.get_current_chat_provider_id(umo=umo)
-            )
-        except ProviderNotFoundError as exc:
-            logger.warning(f"No LLM provider configured: {exc}")
-            return False
-
-        prompt = build_group_update_prompt(
-            existing_by_user,
+        ok = await _run_phase_updates(
+            context,
+            store,
+            config,
+            debug_log,
+            group_id,
             pending_by_user,
-            sorted(candidate_user_ids),
-            nickname_by_user,
+            profiles_by_user,
+            umo,
+            clear_old_user_ids=set(),
         )
-        debug_log("[AIC] Group update prompt:\n" + prompt)
+        if ok:
+            delete_ids = [msg.id for msgs in pending_by_user.values() for msg in msgs]
+            if delete_ids:
+                await asyncio.to_thread(store.delete_pending_messages, delete_ids)
+        return ok
+
+
+def _build_pending_by_user(pending, attribution_map, nickname_to_user) -> dict[str, list]:
+    pending_by_user: dict[str, list] = {}
+    for msg in pending:
+        targets = attribution_map.get(msg.id)
+        if not targets:
+            targets = list(extract_target_ids_from_raw_text(msg.message))
+        if not targets and nickname_to_user:
+            for nickname, target_id in nickname_to_user.items():
+                if target_id == msg.user_id:
+                    continue
+                if nickname and nickname in msg.message:
+                    targets = targets or []
+                    targets.append(target_id)
+        if targets:
+            for target_id in targets:
+                pending_by_user.setdefault(target_id, []).append(msg)
+        else:
+            pending_by_user.setdefault(msg.user_id, []).append(msg)
+    return pending_by_user
+
+
+async def _select_eligible_users(
+    store: ImpressionStore,
+    group_id: str,
+    pending_by_user: dict[str, list],
+    config,
+) -> list[str]:
+    eligible: list[str] = []
+    for user_id, msgs in pending_by_user.items():
+        last_seen = max(m.ts for m in msgs)
+        pending_count = len(msgs)
+        if pending_count >= config.update_msg_threshold:
+            eligible.append(user_id)
+            continue
+        profile = await asyncio.to_thread(store.get_profile, group_id, user_id)
+        last_update = profile.updated_at if profile else 0
+        if last_seen - last_update >= config.update_time_threshold_sec:
+            eligible.append(user_id)
+    return eligible
+
+
+async def _run_phase_updates(
+    context,
+    store: ImpressionStore,
+    config,
+    debug_log,
+    group_id: str,
+    pending_by_user: dict[str, list],
+    profiles_by_user: dict[str, ProfileRecord | None],
+    umo: str,
+    clear_old_user_ids: set[str],
+) -> bool:
+    if not pending_by_user:
+        return False
+
+    provider_id = await _get_provider_id(context, config, umo)
+    if not provider_id:
+        return False
+
+    known_user_ids = set(pending_by_user.keys())
+    nickname_by_user = {
+        user_id: (profiles_by_user.get(user_id).nickname or "")
+        if profiles_by_user.get(user_id)
+        else ""
+        for user_id in known_user_ids
+    }
+
+    phase1_prompt = build_phase1_prompt(pending_by_user, known_user_ids, nickname_by_user)
+    debug_log("[AIC] Phase1 prompt:\n" + phase1_prompt)
+    try:
+        resp = await context.llm_generate(
+            chat_provider_id=provider_id,
+            system_prompt=PHASE1_CANDIDATE_SYSTEM_PROMPT,
+            prompt=phase1_prompt,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.error(f"LLM phase1 call failed: {exc}")
+        return False
+    raw_text = resp.completion_text or ""
+    debug_log("[AIC] Phase1 raw response:\n" + raw_text)
+    phase1_data, ok = parse_phase1_candidates(raw_text, known_user_ids)
+    if not ok:
+        logger.warning("LLM phase1 returned invalid JSON")
+        return False
+
+    candidate_by_user = _normalize_phase1_candidates(phase1_data)
+    if not candidate_by_user:
+        return False
+
+    existing_by_user = {}
+    users_for_merge = set()
+    for user_id in known_user_ids:
+        profile = profiles_by_user.get(user_id)
+        existing_traits = profile.traits if profile and user_id not in clear_old_user_ids else []
+        existing_facts = profile.facts if profile and user_id not in clear_old_user_ids else []
+        existing_by_user[user_id] = {
+            "traits": existing_traits,
+            "facts": existing_facts,
+        }
+        if existing_traits or existing_facts:
+            users_for_merge.add(user_id)
+
+    final_by_user: dict[str, dict] = {}
+    mapping_by_user: dict[str, dict] = {}
+
+    if users_for_merge:
+        phase2_prompt = build_phase2_prompt(
+            {uid: existing_by_user[uid] for uid in users_for_merge},
+            {
+                uid: candidate_by_user.get(uid, {"traits": {}, "facts": {}})
+                for uid in users_for_merge
+            },
+        )
+        debug_log("[AIC] Phase2 prompt:\n" + phase2_prompt)
         try:
             resp = await context.llm_generate(
                 chat_provider_id=provider_id,
-                system_prompt=GROUP_PROFILE_UPDATE_SYSTEM_PROMPT,
-                prompt=prompt,
+                system_prompt=PHASE2_MERGE_SYSTEM_PROMPT,
+                prompt=phase2_prompt,
             )
-        except ProviderNotFoundError as exc:
-            logger.warning(f"Provider not found for group impression update: {exc}")
-            return False
         except Exception as exc:  # noqa: BLE001
-            logger.error(f"LLM group update call failed: {exc}")
+            logger.error(f"LLM phase2 call failed: {exc}")
             return False
-
         raw_text = resp.completion_text or ""
-        debug_log("[AIC] Group update raw response:\n" + raw_text)
-        updates, ok = parse_group_profile_json(raw_text, existing_by_user)
+        debug_log("[AIC] Phase2 raw response:\n" + raw_text)
+        phase2_data, ok = parse_phase2_merge(raw_text, users_for_merge)
         if not ok:
-            logger.warning(
-                "LLM group update returned invalid JSON, keeping pending messages"
-            )
+            logger.warning("LLM phase2 returned invalid JSON")
             return False
+        for user_id, payload in phase2_data.items():
+            final_by_user[user_id] = {
+                "traits": payload.get("traits", []),
+                "facts": payload.get("facts", []),
+            }
+            mapping_by_user[user_id] = payload.get("mapping", {})
 
-        now = int(time.time())
-        for user_id, data in updates.items():
-            msgs = pending_by_user.get(user_id)
-            if not msgs:
-                continue
-            profile = profile_by_user.get(user_id)
-            nickname = profile.nickname if profile and profile.nickname else user_id
-            last_seen = max(m.ts for m in msgs)
-            record = ProfileRecord(
-                group_id=group_id,
-                user_id=user_id,
-                nickname=nickname,
-                last_seen=last_seen,
-                summary=data["summary"],
-                traits=data["traits"],
-                facts=data["facts"],
-                examples=data["examples"],
-                updated_at=now,
-                version=(profile.version if profile else 1),
-            )
-            await asyncio.to_thread(store.upsert_profile, record)
+    for user_id in known_user_ids:
+        if user_id in final_by_user:
+            continue
+        candidates = candidate_by_user.get(user_id, {"traits": {}, "facts": {}})
+        final_traits = list(candidates.get("traits", {}).keys())
+        final_facts = list(candidates.get("facts", {}).keys())
+        final_by_user[user_id] = {"traits": final_traits, "facts": final_facts}
+        mapping_by_user[user_id] = {
+            "traits": {t: [t] for t in final_traits},
+            "facts": {f: [f] for f in final_facts},
+        }
 
-        delete_ids = [msg.id for msgs in pending_by_user.values() for msg in msgs]
-        if delete_ids:
-            await asyncio.to_thread(store.delete_pending_messages, delete_ids)
-        return True
+    summary_prompt = build_phase3_prompt(final_by_user, profiles_by_user)
+    debug_log("[AIC] Phase3 prompt:\n" + summary_prompt)
+    try:
+        resp = await context.llm_generate(
+            chat_provider_id=provider_id,
+            system_prompt=PHASE3_SUMMARY_SYSTEM_PROMPT,
+            prompt=summary_prompt,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.error(f"LLM phase3 call failed: {exc}")
+        return False
+    raw_text = resp.completion_text or ""
+    debug_log("[AIC] Phase3 raw response:\n" + raw_text)
+    summaries, ok = parse_phase3_summaries(raw_text, known_user_ids)
+    if not ok:
+        logger.warning("LLM phase3 returned invalid JSON")
+        summaries = {}
+
+    now = int(time.time())
+    pending_by_id = {msg.id: msg for msgs in pending_by_user.values() for msg in msgs}
+
+    for user_id in known_user_ids:
+        profile = profiles_by_user.get(user_id)
+        nickname = profile.nickname if profile and profile.nickname else user_id
+        last_seen = max(m.ts for m in pending_by_user[user_id])
+        summary = summaries.get(user_id) or (profile.summary if profile else "") or ""
+        final_traits = final_by_user[user_id]["traits"]
+        final_facts = final_by_user[user_id]["facts"]
+        record = ProfileRecord(
+            group_id=group_id,
+            user_id=user_id,
+            nickname=nickname,
+            last_seen=last_seen,
+            summary=summary,
+            traits=final_traits,
+            facts=final_facts,
+            examples=[],
+            updated_at=now,
+            version=(profile.version if profile else 1),
+        )
+        await asyncio.to_thread(store.upsert_profile, record)
+
+        evidence_records = build_evidence_records(
+            group_id,
+            user_id,
+            final_traits,
+            final_facts,
+            mapping_by_user.get(user_id, {}),
+            candidate_by_user.get(user_id, {}),
+            pending_by_id,
+            now,
+        )
+        if evidence_records:
+            await asyncio.to_thread(store.insert_evidence, evidence_records)
+            _prune_evidence(store, group_id, user_id, final_traits, final_facts)
+
+    return True
 
 
-def build_update_prompt(existing: dict, pending) -> str:
-    lines = [
-        "Existing profile (JSON):",
-        json_dumps(existing),
-        "",
-        "New messages:",
-    ]
-    for idx, msg in enumerate(pending, 1):
-        ts_text = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(msg.ts))
-        text = plain_from_raw_text(msg.message)
+async def _get_provider_id(context, config, umo: str) -> str:
+    try:
+        return config.update_provider_id or await context.get_current_chat_provider_id(umo=umo)
+    except ProviderNotFoundError as exc:
+        logger.warning(f"No LLM provider configured: {exc}")
+        return ""
+
+
+def _normalize_phase1_candidates(raw: dict[str, dict[str, list[dict]]]) -> dict[str, dict]:
+    results: dict[str, dict] = {}
+    for user_id, payload in raw.items():
+        traits = _normalize_candidate_items(payload.get("traits", []))
+        facts = _normalize_candidate_items(payload.get("facts", []))
+        results[user_id] = {"traits": traits, "facts": facts}
+    return results
+
+
+def _normalize_candidate_items(items: list[dict]) -> dict[str, list[int]]:
+    results: dict[str, list[int]] = {}
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        text = str(item.get("text", "")).strip()
         if not text:
             continue
-        lines.append(f"{idx}. [{ts_text}] {text}")
-    return "\n".join(lines)
+        evidence_ids = item.get("evidence_ids")
+        if not isinstance(evidence_ids, list):
+            evidence_ids = []
+        cleaned: list[int] = []
+        for ev in evidence_ids:
+            try:
+                cleaned.append(int(ev))
+            except (TypeError, ValueError):
+                continue
+        existing = results.get(text, [])
+        for ev in cleaned:
+            if ev not in existing:
+                existing.append(ev)
+        results[text] = existing
+    return results
 
 
-def build_group_update_prompt(
-    existing_by_user: dict[str, dict],
-    pending_by_user,
-    known_user_ids: list[str],
-    nickname_by_user: dict[str, str],
-) -> str:
-    lines = [
-        "Existing profiles (JSON by user_id):",
-        json_dumps(existing_by_user),
-        "",
-        "Known users (id list):",
-    ]
-    lines.append(", ".join(known_user_ids))
-    if nickname_by_user:
-        lines.extend(["", "Known users (id -> nickname):"])
-        for user_id, nickname in nickname_by_user.items():
-            lines.append(f"{user_id}: {nickname}")
-    lines.extend(["", "New messages:"])
-    for user_id, messages in pending_by_user.items():
-        lines.append(f"target_id={user_id}")
-        for idx, msg in enumerate(messages, 1):
-            ts_text = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(msg.ts))
-            lines.append(f"{idx}. [{ts_text}] speaker={msg.user_id} text={msg.message}")
-        lines.append("")
-    return "\n".join(lines).strip()
+def _prune_evidence(
+    store: ImpressionStore,
+    group_id: str,
+    user_id: str,
+    traits: list[str],
+    facts: list[str],
+) -> None:
+    for item_text in traits:
+        store.prune_evidence(group_id, user_id, "trait", item_text, MAX_EVIDENCE_PER_ITEM)
+    for item_text in facts:
+        store.prune_evidence(group_id, user_id, "fact", item_text, MAX_EVIDENCE_PER_ITEM)
+
+
+def build_evidence_records(
+    group_id: str,
+    user_id: str,
+    final_traits: list[str],
+    final_facts: list[str],
+    mapping: dict,
+    candidates: dict,
+    pending_by_id: dict[int, object],
+    created_at: int,
+) -> list[tuple]:
+    records: list[tuple] = []
+    for item_type, final_items in ("trait", final_traits), ("fact", final_facts):
+        mapping_block = mapping.get(f"{item_type}s", {}) if isinstance(mapping, dict) else {}
+        candidate_items = candidates.get(f"{item_type}s", {})
+        for item_text in final_items:
+            candidate_texts = []
+            if isinstance(mapping_block, dict) and item_text in mapping_block:
+                mapped = mapping_block.get(item_text)
+                if isinstance(mapped, list):
+                    candidate_texts = [str(x) for x in mapped if str(x).strip()]
+                elif isinstance(mapped, str):
+                    candidate_texts = [mapped]
+            if not candidate_texts:
+                candidate_texts = [item_text]
+
+            evidence_ids: list[int] = []
+            for candidate_text in candidate_texts:
+                ids = candidate_items.get(candidate_text, [])
+                for ev_id in ids:
+                    if ev_id not in evidence_ids:
+                        evidence_ids.append(ev_id)
+
+            evidence_msgs = []
+            for ev_id in evidence_ids:
+                msg = pending_by_id.get(ev_id)
+                if not msg:
+                    continue
+                evidence_msgs.append(msg)
+
+            evidence_msgs.sort(key=lambda m: (m.ts, m.id), reverse=True)
+            for msg in evidence_msgs[:MAX_EVIDENCE_PER_ITEM]:
+                records.append(
+                    (
+                        group_id,
+                        user_id,
+                        item_type,
+                        item_text,
+                        msg.id,
+                        msg.message,
+                        msg.ts,
+                        created_at,
+                    )
+                )
+    return records
 
 
 def build_group_attribution_prompt(
@@ -700,8 +697,75 @@ def build_group_attribution_prompt(
     return "\n".join(lines).strip()
 
 
+def build_phase1_prompt(
+    pending_by_user: dict[str, list],
+    known_user_ids: set[str],
+    nickname_by_user: dict[str, str],
+) -> str:
+    lines = [
+        "Known user ids:",
+        ", ".join(sorted(known_user_ids)),
+    ]
+    if nickname_by_user:
+        lines.extend(["", "Known users (id -> nickname):"])
+        for user_id in sorted(known_user_ids):
+            nickname = nickname_by_user.get(user_id, "")
+            if nickname:
+                lines.append(f"{user_id}: {nickname}")
+    lines.extend(["", "Messages (grouped by target_id):"])
+    for user_id, messages in pending_by_user.items():
+        lines.append(f"target_id={user_id}")
+        for msg in messages:
+            ts_text = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(msg.ts))
+            lines.append(
+                f"{msg.id}. [{ts_text}] speaker={msg.user_id} text={msg.message}"
+            )
+        lines.append("")
+    return "\n".join(lines).strip()
+
+
+def build_phase2_prompt(
+    existing_by_user: dict[str, dict],
+    candidates_by_user: dict[str, dict],
+) -> str:
+    lines = [
+        "Existing traits/facts (JSON by user_id):",
+        json_dumps(existing_by_user),
+        "",
+        "Candidate traits/facts (JSON by user_id):",
+        json_dumps(
+            {
+                user_id: {
+                    "traits": list(payload.get("traits", {}).keys()),
+                    "facts": list(payload.get("facts", {}).keys()),
+                }
+                for user_id, payload in candidates_by_user.items()
+            }
+        ),
+    ]
+    return "\n".join(lines).strip()
+
+
+def build_phase3_prompt(
+    final_by_user: dict[str, dict],
+    profiles_by_user: dict[str, ProfileRecord | None],
+) -> str:
+    payload = {}
+    for user_id, items in final_by_user.items():
+        profile = profiles_by_user.get(user_id)
+        payload[user_id] = {
+            "summary": profile.summary if profile and profile.summary else "",
+            "traits": items.get("traits", []),
+            "facts": items.get("facts", []),
+        }
+    lines = [
+        "Final traits/facts with existing summaries (JSON by user_id):",
+        json_dumps(payload),
+    ]
+    return "\n".join(lines).strip()
+
+
 def json_dumps(data: dict) -> str:
-    # Keep a tiny wrapper so we can centralize formatting later if needed.
     import json
 
     return json.dumps(data, ensure_ascii=False)
