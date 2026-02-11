@@ -243,10 +243,14 @@ def parse_phase2_merge(
         traits = payload.get("traits") if isinstance(payload.get("traits"), list) else []
         facts = payload.get("facts") if isinstance(payload.get("facts"), list) else []
         mapping = payload.get("mapping") if isinstance(payload.get("mapping"), dict) else {}
+        consistency = (
+            payload.get("consistency") if isinstance(payload.get("consistency"), dict) else {}
+        )
         results[user_id] = {
             "traits": [str(x) for x in traits if str(x).strip()],
             "facts": [str(x) for x in facts if str(x).strip()],
             "mapping": mapping,
+            "consistency": consistency,
         }
     if not results:
         return {}, False

@@ -18,6 +18,8 @@ class PluginConfig:
     group_batch_attribution_max_messages: int
     group_batch_attribution_max_targets_per_message: int
     group_batch_attribution_include_summary: bool
+    bot_user_id: str
+    bot_aliases: list[str]
     alias_analysis_batch_size: int
     update_provider_id: str
     alias_provider_id: str
@@ -63,6 +65,8 @@ class PluginConfig:
             group_batch_attribution_include_summary=bool(
                 update.get("group_batch_attribution_include_summary", True)
             ),
+            bot_user_id=str(basic.get("bot_user_id", "")).strip(),
+            bot_aliases=[str(x).strip() for x in basic.get("bot_aliases", []) if str(x).strip()],
             alias_analysis_batch_size=int(alias.get("alias_analysis_batch_size", 15)),
             update_provider_id=str(model.get("update_provider_id", "")).strip(),
             alias_provider_id=str(model.get("alias_provider_id", "")).strip(),

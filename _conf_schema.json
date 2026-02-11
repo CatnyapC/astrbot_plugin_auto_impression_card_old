@@ -8,6 +8,18 @@
         "description": "启用插件",
         "type": "bool",
         "default": true
+      },
+      "bot_user_id": {
+        "description": "机器人用户ID",
+        "type": "string",
+        "hint": "用于别称固定映射",
+        "default": ""
+      },
+      "bot_aliases": {
+        "description": "机器人别称",
+        "type": "list",
+        "hint": "这些别称会强制映射到机器人用户ID",
+        "default": []
       }
     }
   },

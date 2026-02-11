@@ -12,7 +12,7 @@ from .prompts import (
     PHASE2_MERGE_SYSTEM_PROMPT,
     PHASE3_SUMMARY_SYSTEM_PROMPT,
 )
-from .storage import ImpressionStore, ProfileRecord
+from .storage import GroupMessage, ImpressionStore, ProfileRecord
 from .utils import (
     extract_target_ids_from_raw_text,
     parse_attribution_json,
@@ -20,6 +20,7 @@ from .utils import (
     parse_phase2_merge,
     parse_phase3_summaries,
 )
+import re
 
 MAX_PENDING_MESSAGES = 200
 MAX_EVIDENCE_PER_ITEM = 3
@@ -53,6 +54,7 @@ async def maybe_schedule_update(
             )
             if not pending:
                 return
+            pending = _wrap_pending_messages(group_id, user_id, pending)
 
             profile = await asyncio.to_thread(store.get_profile, group_id, user_id)
             last_update = profile.updated_at if profile else 0
@@ -112,7 +114,6 @@ async def maybe_schedule_group_update(
             if not pending:
                 return
 
-            pending_by_id = {msg.id: msg for msg in pending}
             recent_profiles = await asyncio.to_thread(
                 store.get_recent_profiles_by_group,
                 group_id,
@@ -128,6 +129,8 @@ async def maybe_schedule_group_update(
                 for user_id, nickname in nickname_by_user.items():
                     if nickname and nickname not in nickname_to_user:
                         nickname_to_user[nickname] = user_id
+
+            alias_index = await asyncio.to_thread(store.get_alias_index, group_id)
 
             attribution_map: dict[int, list[str]] = {}
             if config.group_batch_enable_semantic_attribution:
@@ -162,6 +165,9 @@ async def maybe_schedule_group_update(
                 pending,
                 attribution_map,
                 nickname_to_user,
+                alias_index,
+                config.bot_user_id,
+                set(config.bot_aliases),
             )
             if not pending_by_user:
                 return
@@ -232,6 +238,7 @@ async def force_update(
         )
         if not pending:
             return False
+        pending = _wrap_pending_messages(group_id, user_id, pending)
 
         profile = await asyncio.to_thread(store.get_profile, group_id, user_id)
         profiles_by_user = {user_id: profile}
@@ -274,7 +281,6 @@ async def force_group_update(
         if not pending:
             return False
 
-        pending_by_id = {msg.id: msg for msg in pending}
         recent_profiles = await asyncio.to_thread(
             store.get_recent_profiles_by_group,
             group_id,
@@ -290,6 +296,7 @@ async def force_group_update(
             for user_id, nickname in nickname_by_user.items():
                 if nickname and nickname not in nickname_to_user:
                     nickname_to_user[nickname] = user_id
+        alias_index = await asyncio.to_thread(store.get_alias_index, group_id)
 
         attribution_map: dict[int, list[str]] = {}
         if config.group_batch_enable_semantic_attribution:
@@ -324,6 +331,9 @@ async def force_group_update(
             pending,
             attribution_map,
             nickname_to_user,
+            alias_index,
+            config.bot_user_id,
+            set(config.bot_aliases),
         )
         if not pending_by_user:
             return False
@@ -351,25 +361,104 @@ async def force_group_update(
         return ok
 
 
-def _build_pending_by_user(pending, attribution_map, nickname_to_user) -> dict[str, list]:
+def _build_pending_by_user(
+    pending,
+    attribution_map,
+    nickname_to_user,
+    alias_index: dict[str, dict[str, list[str]]],
+    bot_user_id: str,
+    bot_aliases: set[str],
+) -> dict[str, list]:
     pending_by_user: dict[str, list] = {}
     for msg in pending:
-        targets = attribution_map.get(msg.id)
+        targets = list(extract_target_ids_from_raw_text(msg.message))
+
         if not targets:
-            targets = list(extract_target_ids_from_raw_text(msg.message))
+            bot_targets = _resolve_bot_alias_targets(msg.message, bot_user_id, bot_aliases)
+            targets.extend(bot_targets)
+
+        if not targets:
+            alias_targets = _resolve_alias_targets(
+                msg.user_id, msg.message, alias_index
+            )
+            targets.extend(alias_targets)
+
         if not targets and nickname_to_user:
-            for nickname, target_id in nickname_to_user.items():
-                if target_id == msg.user_id:
-                    continue
-                if nickname and nickname in msg.message:
-                    targets = targets or []
-                    targets.append(target_id)
+            nickname_targets = _resolve_nickname_targets(msg.message, nickname_to_user)
+            targets.extend(nickname_targets)
+
+        if not targets:
+            targets = attribution_map.get(msg.id, [])
+
         if targets:
             for target_id in targets:
                 pending_by_user.setdefault(target_id, []).append(msg)
         else:
             pending_by_user.setdefault(msg.user_id, []).append(msg)
     return pending_by_user
+
+
+def _wrap_pending_messages(group_id: str, user_id: str, pending) -> list[GroupMessage]:
+    wrapped: list[GroupMessage] = []
+    for msg in pending:
+        wrapped.append(
+            GroupMessage(
+                id=msg.id,
+                group_id=group_id,
+                user_id=user_id,
+                message=msg.message,
+                ts=msg.ts,
+            )
+        )
+    return wrapped
+
+
+def _resolve_bot_alias_targets(
+    message: str, bot_user_id: str, bot_aliases: set[str]
+) -> list[str]:
+    if not bot_user_id or not bot_aliases:
+        return []
+    tokens = _extract_tokens(message)
+    for token in tokens:
+        if token in bot_aliases:
+            return [bot_user_id]
+    return []
+
+
+def _resolve_alias_targets(
+    speaker_id: str,
+    message: str,
+    alias_index: dict[str, dict[str, list[str]]],
+) -> list[str]:
+    speaker_map = alias_index.get(str(speaker_id), {})
+    if not speaker_map:
+        return []
+    tokens = _extract_tokens(message)
+    targets: list[str] = []
+    for token in tokens:
+        if token in speaker_map:
+            for target_id in speaker_map[token]:
+                if target_id not in targets:
+                    targets.append(target_id)
+    return targets
+
+
+def _resolve_nickname_targets(
+    message: str, nickname_to_user: dict[str, str]
+) -> list[str]:
+    tokens = _extract_tokens(message)
+    targets: list[str] = []
+    for token in tokens:
+        target_id = nickname_to_user.get(token)
+        if target_id and target_id not in targets:
+            targets.append(target_id)
+    return targets
+
+
+def _extract_tokens(text: str) -> list[str]:
+    if not text:
+        return []
+    return re.findall(r"[\\w\\u4e00-\\u9fff]{2,16}", text)
 
 
 async def _select_eligible_users(
@@ -455,6 +544,7 @@ async def _run_phase_updates(
 
     final_by_user: dict[str, dict] = {}
     mapping_by_user: dict[str, dict] = {}
+    consistency_by_user: dict[str, dict] = {}
 
     if users_for_merge:
         phase2_prompt = build_phase2_prompt(
@@ -486,6 +576,7 @@ async def _run_phase_updates(
                 "facts": payload.get("facts", []),
             }
             mapping_by_user[user_id] = payload.get("mapping", {})
+            consistency_by_user[user_id] = payload.get("consistency", {})
 
     for user_id in known_user_ids:
         if user_id in final_by_user:
@@ -497,6 +588,10 @@ async def _run_phase_updates(
         mapping_by_user[user_id] = {
             "traits": {t: [t] for t in final_traits},
             "facts": {f: [f] for f in final_facts},
+        }
+        consistency_by_user[user_id] = {
+            "traits": {t: "neutral" for t in final_traits},
+            "facts": {f: "neutral" for f in final_facts},
         }
 
     summary_prompt = build_phase3_prompt(final_by_user, profiles_by_user)
@@ -519,6 +614,10 @@ async def _run_phase_updates(
 
     now = int(time.time())
     pending_by_id = {msg.id: msg for msgs in pending_by_user.values() for msg in msgs}
+    trust_scores = {
+        uid: await asyncio.to_thread(store.get_user_trust, group_id, uid)
+        for uid in {msg.user_id for msg in pending_by_id.values()}
+    }
 
     for user_id in known_user_ids:
         profile = profiles_by_user.get(user_id)
@@ -527,6 +626,22 @@ async def _run_phase_updates(
         summary = summaries.get(user_id) or (profile.summary if profile else "") or ""
         final_traits = final_by_user[user_id]["traits"]
         final_facts = final_by_user[user_id]["facts"]
+        evidence_records, trait_conf_map, fact_conf_map = build_evidence_records(
+            group_id,
+            user_id,
+            final_traits,
+            final_facts,
+            mapping_by_user.get(user_id, {}),
+            consistency_by_user.get(user_id, {}),
+            candidate_by_user.get(user_id, {}),
+            pending_by_id,
+            now,
+            trust_scores,
+        )
+        if evidence_records:
+            await asyncio.to_thread(store.insert_evidence, evidence_records)
+            _prune_evidence(store, group_id, user_id, final_traits, final_facts)
+
         record = ProfileRecord(
             group_id=group_id,
             user_id=user_id,
@@ -539,21 +654,12 @@ async def _run_phase_updates(
             updated_at=now,
             version=(profile.version if profile else 1),
         )
-        await asyncio.to_thread(store.upsert_profile, record)
-
-        evidence_records = build_evidence_records(
-            group_id,
-            user_id,
-            final_traits,
-            final_facts,
-            mapping_by_user.get(user_id, {}),
-            candidate_by_user.get(user_id, {}),
-            pending_by_id,
-            now,
+        await asyncio.to_thread(
+            store.upsert_profile_with_confidence,
+            record,
+            trait_conf_map,
+            fact_conf_map,
         )
-        if evidence_records:
-            await asyncio.to_thread(store.insert_evidence, evidence_records)
-            _prune_evidence(store, group_id, user_id, final_traits, final_facts)
 
     return True
 
@@ -575,8 +681,8 @@ def _normalize_phase1_candidates(raw: dict[str, dict[str, list[dict]]]) -> dict[
     return results
 
 
-def _normalize_candidate_items(items: list[dict]) -> dict[str, list[int]]:
-    results: dict[str, list[int]] = {}
+def _normalize_candidate_items(items: list[dict]) -> dict[str, list[dict]]:
+    results: dict[str, list[dict]] = {}
     for item in items:
         if not isinstance(item, dict):
             continue
@@ -584,20 +690,54 @@ def _normalize_candidate_items(items: list[dict]) -> dict[str, list[int]]:
         if not text:
             continue
         evidence_ids = item.get("evidence_ids")
+        evidence_confidences = item.get("evidence_confidences")
+        joke_likelihoods = item.get("joke_likelihoods")
+        source_types = item.get("source_types")
         if not isinstance(evidence_ids, list):
             evidence_ids = []
-        cleaned: list[int] = []
-        for ev in evidence_ids:
+        if not isinstance(evidence_confidences, list):
+            evidence_confidences = []
+        if not isinstance(joke_likelihoods, list):
+            joke_likelihoods = []
+        if not isinstance(source_types, list):
+            source_types = []
+        signals: list[dict] = []
+        for idx, ev in enumerate(evidence_ids):
             try:
-                cleaned.append(int(ev))
+                ev_id = int(ev)
             except (TypeError, ValueError):
                 continue
+            evidence_conf = (
+                float(evidence_confidences[idx])
+                if idx < len(evidence_confidences)
+                else 0.6
+            )
+            joke_lik = (
+                float(joke_likelihoods[idx]) if idx < len(joke_likelihoods) else 0.2
+            )
+            source_type = (
+                str(source_types[idx]).strip().lower()
+                if idx < len(source_types)
+                else "other"
+            )
+            signals.append(
+                {
+                    "evidence_id": ev_id,
+                    "evidence_confidence": _clamp(evidence_conf),
+                    "joke_likelihood": _clamp(joke_lik),
+                    "source_type": source_type if source_type in {"self", "other"} else "other",
+                }
+            )
         existing = results.get(text, [])
-        for ev in cleaned:
-            if ev not in existing:
-                existing.append(ev)
+        for signal in signals:
+            if signal["evidence_id"] not in {s["evidence_id"] for s in existing}:
+                existing.append(signal)
         results[text] = existing
     return results
+
+
+def _clamp(value: float, low: float = 0.0, high: float = 1.0) -> float:
+    return max(low, min(high, value))
 
 
 def _prune_evidence(
@@ -619,13 +759,21 @@ def build_evidence_records(
     final_traits: list[str],
     final_facts: list[str],
     mapping: dict,
+    consistency: dict,
     candidates: dict,
     pending_by_id: dict[int, object],
     created_at: int,
-) -> list[tuple]:
+    trust_scores: dict[str, float],
+) -> tuple[list[tuple], dict[str, float], dict[str, float]]:
     records: list[tuple] = []
+    trait_conf: dict[str, float] = {}
+    fact_conf: dict[str, float] = {}
+
     for item_type, final_items in ("trait", final_traits), ("fact", final_facts):
         mapping_block = mapping.get(f"{item_type}s", {}) if isinstance(mapping, dict) else {}
+        consistency_block = (
+            consistency.get(f"{item_type}s", {}) if isinstance(consistency, dict) else {}
+        )
         candidate_items = candidates.get(f"{item_type}s", {})
         for item_text in final_items:
             candidate_texts = []
@@ -638,22 +786,52 @@ def build_evidence_records(
             if not candidate_texts:
                 candidate_texts = [item_text]
 
-            evidence_ids: list[int] = []
-            for candidate_text in candidate_texts:
-                ids = candidate_items.get(candidate_text, [])
-                for ev_id in ids:
-                    if ev_id not in evidence_ids:
-                        evidence_ids.append(ev_id)
-
+            signals: list[dict] = []
             evidence_msgs = []
-            for ev_id in evidence_ids:
-                msg = pending_by_id.get(ev_id)
-                if not msg:
-                    continue
-                evidence_msgs.append(msg)
+            for candidate_text in candidate_texts:
+                items = candidate_items.get(candidate_text, [])
+                for item in items:
+                    ev_id = item.get("evidence_id")
+                    if ev_id is None:
+                        continue
+                    msg = pending_by_id.get(ev_id)
+                    if not msg:
+                        continue
+                    evidence_conf = float(item.get("evidence_confidence", 0.6))
+                    joke_lik = float(item.get("joke_likelihood", 0.2))
+                    source_type = item.get("source_type", "other")
+                    speaker_id = str(msg.user_id)
+                    trust = trust_scores.get(speaker_id, 0.7)
+                    source_weight = 1.0 if source_type == "self" else 0.7
+                    consistency_tag = (
+                        consistency_block.get(item_text) if isinstance(consistency_block, dict) else None
+                    )
+                    consistency_weight = 1.0
+                    if consistency_tag == "conflicting":
+                        consistency_weight = 0.4
+                    elif consistency_tag == "neutral":
+                        consistency_weight = 0.7
+                    signal = _clamp(
+                        evidence_conf * (1 - joke_lik) * source_weight * trust * consistency_weight
+                    )
+                    signals.append({"signal": signal, "msg": msg, "item": item})
+                    evidence_msgs.append((signal, msg, item))
 
-            evidence_msgs.sort(key=lambda m: (m.ts, m.id), reverse=True)
-            for msg in evidence_msgs[:MAX_EVIDENCE_PER_ITEM]:
+            if not signals:
+                final_conf = 0.0
+            else:
+                prod = 1.0
+                for s in signals:
+                    prod *= 1 - _clamp(s["signal"])
+                final_conf = _clamp(1 - prod)
+
+            if item_type == "trait":
+                trait_conf[item_text] = final_conf
+            else:
+                fact_conf[item_text] = final_conf
+
+            evidence_msgs.sort(key=lambda x: (x[0], x[1].ts, x[1].id), reverse=True)
+            for signal, msg, item in evidence_msgs[:MAX_EVIDENCE_PER_ITEM]:
                 records.append(
                     (
                         group_id,
@@ -663,10 +841,13 @@ def build_evidence_records(
                         msg.id,
                         msg.message,
                         msg.ts,
+                        float(item.get("evidence_confidence", 0.6)),
+                        float(item.get("joke_likelihood", 0.2)),
+                        item.get("source_type", "other"),
                         created_at,
                     )
                 )
-    return records
+    return records, trait_conf, fact_conf
 
 
 def build_group_attribution_prompt(

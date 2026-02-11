@@ -113,7 +113,21 @@ class ImpressionStore:
                     message_id INTEGER NOT NULL,
                     message_text TEXT NOT NULL,
                     message_ts INTEGER NOT NULL,
+                    evidence_confidence REAL,
+                    joke_likelihood REAL,
+                    source_type TEXT,
                     created_at INTEGER NOT NULL
+                )
+                """
+            )
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS user_trust (
+                    group_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    trust REAL NOT NULL,
+                    updated_at INTEGER NOT NULL,
+                    PRIMARY KEY (group_id, user_id)
                 )
                 """
             )
@@ -150,6 +164,10 @@ class ImpressionStore:
         cols = {row[1] for row in cur.execute("PRAGMA table_info(profiles)")}
         if "examples" not in cols:
             cur.execute("ALTER TABLE profiles ADD COLUMN examples TEXT")
+        if "traits_confidence" not in cols:
+            cur.execute("ALTER TABLE profiles ADD COLUMN traits_confidence TEXT")
+        if "facts_confidence" not in cols:
+            cur.execute("ALTER TABLE profiles ADD COLUMN facts_confidence TEXT")
 
     def touch_profile(self, group_id: str, user_id: str, nickname: str, ts: int) -> None:
         with self._connect() as conn:
@@ -360,6 +378,49 @@ class ImpressionStore:
             )
             conn.commit()
 
+    def upsert_profile_with_confidence(
+        self,
+        record: ProfileRecord,
+        traits_confidence: dict[str, float],
+        facts_confidence: dict[str, float],
+    ) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO profiles (
+                    group_id, user_id, nickname, last_seen, summary, traits, facts,
+                    examples, traits_confidence, facts_confidence, updated_at, version
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(group_id, user_id) DO UPDATE SET
+                    nickname=excluded.nickname,
+                    last_seen=excluded.last_seen,
+                    summary=excluded.summary,
+                    traits=excluded.traits,
+                    facts=excluded.facts,
+                    examples=excluded.examples,
+                    traits_confidence=excluded.traits_confidence,
+                    facts_confidence=excluded.facts_confidence,
+                    updated_at=excluded.updated_at,
+                    version=excluded.version
+                """,
+                (
+                    record.group_id,
+                    record.user_id,
+                    record.nickname,
+                    record.last_seen,
+                    record.summary,
+                    json.dumps(record.traits, ensure_ascii=False),
+                    json.dumps(record.facts, ensure_ascii=False),
+                    json.dumps(record.examples, ensure_ascii=False),
+                    json.dumps(traits_confidence, ensure_ascii=False),
+                    json.dumps(facts_confidence, ensure_ascii=False),
+                    record.updated_at,
+                    record.version,
+                ),
+            )
+            conn.commit()
+
     def insert_evidence(self, records: list[tuple]) -> None:
         if not records:
             return
@@ -374,11 +435,51 @@ class ImpressionStore:
                     message_id,
                     message_text,
                     message_ts,
+                    evidence_confidence,
+                    joke_likelihood,
+                    source_type,
                     created_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 records,
+            )
+            conn.commit()
+
+    def get_user_trust(self, group_id: str, user_id: str) -> float:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT trust FROM user_trust
+                WHERE group_id=? AND user_id=?
+                """,
+                (group_id, user_id),
+            ).fetchone()
+            if row is None:
+                default_trust = 0.7
+                conn.execute(
+                    """
+                    INSERT INTO user_trust (group_id, user_id, trust, updated_at)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (group_id, user_id, default_trust, int(time.time())),
+                )
+                conn.commit()
+                return default_trust
+            return float(row["trust"])
+
+    def upsert_user_trust(self, group_id: str, user_id: str, trust: float) -> None:
+        trust = max(0.0, min(1.0, trust))
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO user_trust (group_id, user_id, trust, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(group_id, user_id) DO UPDATE SET
+                    trust=excluded.trust,
+                    updated_at=excluded.updated_at
+                """,
+                (group_id, user_id, trust, int(time.time())),
             )
             conn.commit()
 
@@ -522,6 +623,30 @@ class ImpressionStore:
                 (group_id, target_id),
             ).fetchall()
             return [dict(row) for row in rows]
+
+    def get_alias_index(self, group_id: str) -> dict[str, dict[str, list[str]]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT speaker_id, alias, target_id, confidence, updated_at
+                FROM alias_map
+                WHERE group_id=?
+                ORDER BY confidence DESC, updated_at DESC
+                """,
+                (group_id,),
+            ).fetchall()
+        index: dict[str, dict[str, list[str]]] = {}
+        for row in rows:
+            speaker_id = str(row["speaker_id"])
+            alias = str(row["alias"]).strip()
+            target_id = str(row["target_id"])
+            if not speaker_id or not alias or not target_id:
+                continue
+            speaker_map = index.setdefault(speaker_id, {})
+            targets = speaker_map.setdefault(alias, [])
+            if target_id not in targets:
+                targets.append(target_id)
+        return index
 
     def prune_aliases(
         self, group_id: str, speaker_id: str, target_id: str, limit: int

@@ -46,6 +46,7 @@ GROUP_ATTRIBUTION_SYSTEM_PROMPT = """
 规则：
 - 如果消息明确指向某人（例如称呼、语义评价、对话上下文），归属到该 user_id。
 - 如果无法判断，输出空列表，不要猜测。
+- 昵称相似但不相同的情况不要归属。
 - 只能使用提供的 user_id。
 - 仅使用简体中文输出。
 
@@ -70,6 +71,9 @@ PHASE1_CANDIDATE_SYSTEM_PROMPT = """
   - traits: list[object]，每个对象包含：
     - text: string
     - evidence_ids: list[number]
+    - evidence_confidences: list[number]  (与 evidence_ids 一一对应, 0-1)
+    - joke_likelihoods: list[number] (与 evidence_ids 一一对应, 0-1)
+    - source_types: list[string] ("self"|"other", 与 evidence_ids 一一对应)
   - facts: list[object]，同上
 """.strip()
 
@@ -90,6 +94,9 @@ PHASE2_MERGE_SYSTEM_PROMPT = """
   - mapping: object，包含：
     - traits: object (final_text -> list[candidate_text])
     - facts: object (final_text -> list[candidate_text])
+  - consistency: object，包含：
+    - traits: object (final_text -> "consistent"|"neutral"|"conflicting")
+    - facts: object (final_text -> "consistent"|"neutral"|"conflicting")
 """.strip()
 
 PHASE3_SUMMARY_SYSTEM_PROMPT = """

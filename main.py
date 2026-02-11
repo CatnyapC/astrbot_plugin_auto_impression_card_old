@@ -107,20 +107,20 @@ class AutoImpressionCard(Star):
         await asyncio.to_thread(
             self.store.enqueue_message, group_id, user_id, raw_text, ts
         )
-        asyncio.create_task(
-            maybe_schedule_alias_analysis(
-                self.context,
-                self.store,
-                self.config,
-                self._debug_log,
-                self._alias_active_updates,
-                self._alias_update_locks,
-                group_id,
-                event.unified_msg_origin,
-            )
-        )
         update_mode = (self.config.update_mode or "group_batch").lower()
         if update_mode in {"per_user", "hybrid"}:
+            asyncio.create_task(
+                maybe_schedule_alias_analysis(
+                    self.context,
+                    self.store,
+                    self.config,
+                    self._debug_log,
+                    self._alias_active_updates,
+                    self._alias_update_locks,
+                    group_id,
+                    event.unified_msg_origin,
+                )
+            )
             asyncio.create_task(
                 maybe_schedule_update(
                     self.context,
@@ -137,13 +137,7 @@ class AutoImpressionCard(Star):
             )
         if update_mode in {"group_batch", "hybrid"}:
             asyncio.create_task(
-                maybe_schedule_group_update(
-                    self.context,
-                    self.store,
-                    self.config,
-                    self._debug_log,
-                    self._group_active_updates,
-                    self._group_update_locks,
+                self._run_group_update_with_alias(
                     group_id,
                     event.unified_msg_origin,
                 )
@@ -337,6 +331,15 @@ class AutoImpressionCard(Star):
         update_mode = (self.config.update_mode or "group_batch").lower()
         yield event.plain_result("正在强制更新印象档案...")
         if update_mode in {"group_batch", "hybrid"}:
+            await force_alias_analysis(
+                self.context,
+                self.store,
+                self.config,
+                self._debug_log,
+                self._alias_update_locks,
+                group_id,
+                event.unified_msg_origin,
+            )
             ok = await force_group_update(
                 self.context,
                 self.store,
@@ -505,6 +508,28 @@ class AutoImpressionCard(Star):
     def _debug_log(self, message: str) -> None:
         if self.config.debug_mode:
             logger.info(message)
+
+    async def _run_group_update_with_alias(self, group_id: str, umo: str) -> None:
+        await maybe_schedule_alias_analysis(
+            self.context,
+            self.store,
+            self.config,
+            self._debug_log,
+            self._alias_active_updates,
+            self._alias_update_locks,
+            group_id,
+            umo,
+        )
+        await maybe_schedule_group_update(
+            self.context,
+            self.store,
+            self.config,
+            self._debug_log,
+            self._group_active_updates,
+            self._group_update_locks,
+            group_id,
+            umo,
+        )
 
     @staticmethod
     def _tool_result(status: str, message: str, extra: str | None = None) -> str:
